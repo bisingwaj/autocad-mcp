@@ -73,7 +73,7 @@ strict = true
 warn_unreachable = true
 # pywin32 n'est pas installable sur la machine de developpement.
 [[tool.mypy.overrides]]
-module = ["win32com.*", "pythoncom", "matplotlib.*"]
+module = ["win32com.*", "pythoncom", "matplotlib.*", "mpl_toolkits.*"]
 ignore_missing_imports = true
 
 # ezdxf est typé mais expose ses symboles par reexport implicite, ce que le

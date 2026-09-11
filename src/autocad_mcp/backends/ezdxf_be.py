@@ -40,6 +40,8 @@ fois, dans ce module.
 from __future__ import annotations
 
 import math
+import os
+import shutil
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -73,6 +75,7 @@ from ..model.ops import (
     AddDimAligned,
     AddHatch,
     AddLine,
+    AddMesh,
     AddMText,
     AddPolyline,
     AddText,
@@ -110,6 +113,7 @@ KIND_TO_DXFTYPE: dict[str, str] = {
     "text": "TEXT",
     "mtext": "MTEXT",
     "hatch": "HATCH",
+    "mesh": "MESH",
     "dim_aligned": "DIMENSION",
     "block_ref": "INSERT",
     "define_block": "BLOCK",
@@ -392,6 +396,8 @@ class EzdxfBackend(CadBackend):
             return self._add_dim_aligned(doc, msp, operation, result)
         if isinstance(operation, AddBlockRef):
             return self._add_block_ref(doc, msp, operation, result)
+        if isinstance(operation, AddMesh):
+            return self._add_mesh(doc, msp, operation, result)
         raise UnsupportedOperation(
             f"{self.name} ne sait pas exécuter {type(operation).__name__}",
             kind=getattr(operation, "kind", None),
@@ -528,6 +534,21 @@ class EzdxfBackend(CadBackend):
             attachment_point=_MTEXT_TOP_LEFT,
         )
         return _ref(entity)
+
+    def _add_mesh(
+        self, doc: Drawing, msp: BaseLayout, operation: AddMesh, result: BatchResult
+    ) -> EntityRef:
+        """Écrit un maillage de facettes, c'est-à-dire un volume.
+
+        Le type MESH du format DXF porte des sommets et des facettes, ce qui
+        correspond exactement au modèle. Il s'affiche en volume dans AutoCAD et
+        se convertit tel quel vers un visualiseur web, sans reconstruction.
+        """
+        mesh = msp.add_mesh(dxfattribs=self._dxfattribs(doc, operation.style, result))
+        with mesh.edit_data() as donnees:
+            donnees.vertices = [tuple(v) for v in operation.vertices]
+            donnees.faces = [list(f) for f in operation.faces]
+        return _ref(mesh)
 
     def _add_hatch(
         self, doc: Drawing, msp: BaseLayout, operation: AddHatch, result: BatchResult
@@ -1078,7 +1099,21 @@ class EzdxfBackend(CadBackend):
     # ---- persistance --------------------------------------------------
 
     def save(self, path: str | None = None) -> str:
-        """Enregistre le document et rend le chemin absolu du fichier écrit."""
+        """Enregistre le document et rend le chemin absolu du fichier écrit.
+
+        L'écriture est **atomique**: le document part dans un fichier voisin,
+        puis remplace la cible en une seule opération. Écrire directement
+        exposerait un fichier à moitié rempli, et AutoCAD qui le relirait à ce
+        moment-là ouvrirait un dessin tronqué.
+
+        Deux situations sont détectées et nommées plutôt que subies, parce
+        qu'elles produisent toutes deux un dessin qu'AutoCAD ouvre en lecture
+        seule sans expliquer pourquoi:
+
+        * **un verrou AutoCAD** à côté du fichier, c'est-à-dire un dessin déjà
+          ouvert, ou le résidu d'un arrêt brutal ;
+        * **un attribut de lecture seule** sur la cible.
+        """
         doc = self._require_doc()
         target = Path(path).expanduser() if path is not None else self._path
         if target is None:
@@ -1088,10 +1123,34 @@ class EzdxfBackend(CadBackend):
             )
         target = target.resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
+        _check_writable(target)
+
+        provisoire = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         try:
-            doc.saveas(str(target))
+            doc.saveas(str(provisoire))
+            # Le remplacement fait hériter les droits du temporaire, pas ceux de
+            # la cible. Sans report, un fichier ouvert en écriture par un groupe
+            # se retrouve en lecture seule pour lui au premier enregistrement.
+            if target.exists():
+                shutil.copymode(target, provisoire)
+            os.replace(provisoire, target)
+        except PermissionError as exc:
+            provisoire.unlink(missing_ok=True)
+            raise OperationFailed(
+                f"Écriture refusée sur {target.name}: le fichier est verrouillé "
+                "par une autre application",
+                path=str(target),
+                remedy=(
+                    "fermer le dessin dans AutoCAD avant de régénérer, ou viser "
+                    "un fichier que rien d'autre n'a ouvert"
+                ),
+            ) from exc
         except (OSError, dxf_const.DXFError) as exc:
-            raise OperationFailed(f"Enregistrement impossible: {exc}", path=str(target)) from exc
+            provisoire.unlink(missing_ok=True)
+            raise OperationFailed(
+                f"Enregistrement impossible: {exc}", path=str(target)
+            ) from exc
+
         self._path = target
         return str(target)
 
@@ -1105,6 +1164,46 @@ class EzdxfBackend(CadBackend):
 
 
 # ---- utilitaires de module --------------------------------------------
+
+
+#: Fichiers témoins qu'AutoCAD dépose à côté d'un dessin qu'il a ouvert.
+#: Leur présence explique à elle seule une ouverture en lecture seule.
+LOCK_SUFFIXES: tuple[str, ...] = (".dwl", ".dwl2")
+
+
+def _check_writable(target: Path) -> None:
+    """Refuse d'écrire là où le résultat serait inutilisable.
+
+    Mieux vaut un refus qui nomme la cause qu'un fichier écrit qu'AutoCAD
+    ouvrira ensuite en lecture seule sans dire pourquoi.
+    """
+    verrous = [
+        target.with_suffix(target.suffix + suffixe)
+        for suffixe in LOCK_SUFFIXES
+        if target.with_suffix(target.suffix + suffixe).exists()
+    ] + [
+        target.with_suffix(suffixe)
+        for suffixe in LOCK_SUFFIXES
+        if target.with_suffix(suffixe).exists()
+    ]
+    if verrous:
+        raise OperationFailed(
+            f"{target.name} est verrouillé: AutoCAD l'a ouvert, ou un arrêt "
+            "brutal a laissé un fichier témoin",
+            path=str(target),
+            locks=[str(v) for v in verrous],
+            remedy=(
+                "fermer le dessin dans AutoCAD; si personne ne l'a ouvert, "
+                f"supprimer {', '.join(v.name for v in verrous)}"
+            ),
+        )
+
+    if target.exists() and not os.access(target, os.W_OK):
+        raise OperationFailed(
+            f"{target.name} porte l'attribut lecture seule",
+            path=str(target),
+            remedy="retirer l'attribut, ou choisir un autre fichier",
+        )
 
 
 def _valid_layer_name(name: str) -> str:

@@ -50,12 +50,14 @@ from ..units import Defaults
 
 __all__ = [
     "Opening",
+    "Panel",
     "door",
     "door_in_wall",
     "label",
     "room",
     "wall",
     "wall_network",
+    "wall_panels",
     "wall_run",
     "window",
 ]
@@ -409,15 +411,52 @@ def _segment_ends(points: list[Point2], index: int) -> tuple[Point2, Point2]:
     return points[index], points[(index + 1) % len(points)]
 
 
-def _pierced_wall_solids(
+@dataclass(frozen=True, slots=True)
+class Panel:
+    """Un morceau de mur en plan, et ce qu'il est.
+
+    ``kind`` vaut ``"solid"`` pour la maçonnerie pleine, ou la nature de la
+    baie qui occupe ce morceau. Le plan ne dessine que les pleins; le volume a
+    besoin des deux, puisqu'une baie porte une allège et un linteau.
+
+    Faire calculer les deux par la même fonction est ce qui garantit qu'un
+    volume tombe exactement sur son plan.
+    """
+
+    points: tuple[Point2, Point2, Point2, Point2]
+    kind: str = "solid"
+
+
+def _quad(
+    p0: Point2,
+    p1: Point2,
+    coins: tuple[Point2, Point2, Point2, Point2],
+    arete: tuple[Point2, Point2, float, float, float, float],
+) -> tuple[Point2, Point2, Point2, Point2]:
+    """Quadrilatère d'un morceau de mur, entre deux points de son axe.
+
+    Un coin qui tombe sur un sommet du réseau reprend le point mitré, ce qui
+    préserve le raccord d'angle. Les autres sont coupés perpendiculairement.
+    """
+    a, b, nx, ny, half, tol = arete
+    au_debut = distance(p0, a) <= tol
+    a_la_fin = distance(p1, b) <= tol
+    gd = coins[0] if au_debut else (p0[0] + nx * half, p0[1] + ny * half)
+    gf = coins[1] if a_la_fin else (p1[0] + nx * half, p1[1] + ny * half)
+    dd = coins[2] if au_debut else (p0[0] - nx * half, p0[1] - ny * half)
+    df = coins[3] if a_la_fin else (p1[0] - nx * half, p1[1] - ny * half)
+    return (gd, gf, df, dd)
+
+
+def wall_panels(
     points: list[Point2],
-    width: float,
-    closed: bool,
-    style: Style,
-    openings: list[Opening],
     defaults: Defaults,
-) -> list[Operation]:
-    """Tronçons pleins du mur, un quadrilatère par morceau restant.
+    *,
+    thickness: float | None = None,
+    closed: bool = False,
+    openings: list[Opening] | None = None,
+) -> list[Panel]:
+    """Découpe un réseau de murs en panneaux, pleins et percés.
 
     Les coins qui touchent un angle du réseau reprennent le sommet mitré, ce
     qui conserve le raccord. Les coins qui touchent une baie sont coupés
@@ -425,16 +464,17 @@ def _pierced_wall_solids(
     """
     from ..geometry import offset_polyline_miter
 
+    width = defaults.wall_thickness if thickness is None else float(thickness)
     half = width / 2.0
     tol = defaults.tolerance
     left = offset_polyline_miter(points, half, closed=closed, tol=tol)
     right = offset_polyline_miter(points, -half, closed=closed, tol=tol)
 
-    par_segment: dict[int, list[tuple[float, float]]] = {}
-    for baie in openings:
-        par_segment.setdefault(baie.segment, []).append((baie.position, baie.width))
+    par_segment: dict[int, list[Opening]] = {}
+    for baie in openings or ():
+        par_segment.setdefault(baie.segment, []).append(baie)
 
-    ops: list[Operation] = []
+    panneaux: list[Panel] = []
     total = _segment_count(points, closed)
 
     for index in range(total):
@@ -444,27 +484,48 @@ def _pierced_wall_solids(
             continue
 
         nx, ny = perpendicular(b[0] - a[0], b[1] - a[1], tol=tol)
-        gauche_debut = left[index]
-        gauche_fin = left[(index + 1) % len(left)]
-        droite_debut = right[index]
-        droite_fin = right[(index + 1) % len(right)]
+        bords = (
+            left[index],
+            left[(index + 1) % len(left)],
+            right[index],
+            right[(index + 1) % len(right)],
+        )
 
-        troncons = split_run_by_openings(a, b, par_segment.get(index, ()), tol=tol)
+        arete = (a, b, nx, ny, half, tol)
+        baies = par_segment.get(index, [])
+        for p0, p1 in split_run_by_openings(
+            a, b, [(o.position, o.width) for o in baies], tol=tol
+        ):
+            panneaux.append(Panel(_quad(p0, p1, bords, arete), "solid"))
 
-        for p0, p1 in troncons:
-            debut_au_sommet = distance(p0, a) <= tol
-            fin_au_sommet = distance(p1, b) <= tol
+        # Les baies elles-mêmes: invisibles en plan, porteuses en volume.
+        ux, uy = (b[0] - a[0]) / longueur, (b[1] - a[1]) / longueur
+        for baie in baies:
+            centre = (a[0] + ux * longueur * baie.position, a[1] + uy * longueur * baie.position)
+            demi = baie.width / 2.0
+            bord1 = (centre[0] - ux * demi, centre[1] - uy * demi)
+            bord2 = (centre[0] + ux * demi, centre[1] + uy * demi)
+            panneaux.append(Panel(_quad(bord1, bord2, bords, arete), baie.kind))
 
-            gd = gauche_debut if debut_au_sommet else (p0[0] + nx * half, p0[1] + ny * half)
-            gf = gauche_fin if fin_au_sommet else (p1[0] + nx * half, p1[1] + ny * half)
-            dd = droite_debut if debut_au_sommet else (p0[0] - nx * half, p0[1] - ny * half)
-            df = droite_fin if fin_au_sommet else (p1[0] - nx * half, p1[1] - ny * half)
+    return panneaux
 
-            ops.append(
-                AddPolyline(points=(gd, gf, df, dd), closed=True, style=style)
-            )
 
-    return ops
+def _pierced_wall_solids(
+    points: list[Point2],
+    width: float,
+    closed: bool,
+    style: Style,
+    openings: list[Opening],
+    defaults: Defaults,
+) -> list[Operation]:
+    """Tronçons pleins du mur, un quadrilatère par morceau restant."""
+    return [
+        AddPolyline(points=panneau.points, closed=True, style=style)
+        for panneau in wall_panels(
+            points, defaults, thickness=width, closed=closed, openings=openings
+        )
+        if panneau.kind == "solid"
+    ]
 
 
 def _opening_symbols(

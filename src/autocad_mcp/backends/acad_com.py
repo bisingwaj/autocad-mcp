@@ -98,6 +98,7 @@ from ..model.ops import (
     AddDimAligned,
     AddHatch,
     AddLine,
+    AddMesh,
     AddMText,
     AddPolyline,
     AddText,
@@ -218,6 +219,7 @@ _OBJECT_NAME_TO_KIND: dict[str, str] = {
     "AcDbSpline": "spline",
     "AcDbPoint": "point",
     "AcDbSolid": "solid",
+    "AcDbPolyFaceMesh": "mesh",  # objet rendu par AddPolyfaceMesh, voir W-87
 }
 
 #: Nom d'opération du projet vers nom de type DXF, pour le code de groupe 0.
@@ -238,6 +240,7 @@ _KIND_TO_DXF: dict[str, str] = {
     "spline": "SPLINE",
     "point": "POINT",
     "solid": "SOLID",
+    "mesh": "POLYLINE",  # POLYFACE MESH est une POLYLINE avec un indicateur 70, voir W-88
 }
 
 #: Code $INSUNITS vers unité du projet.
@@ -315,6 +318,14 @@ _LENGTH_PROPERTY: dict[str, str] = {
     "AcDbCircle": "Circumference",
     "AcDbArc": "ArcLength",
 }
+
+#: Borne haute d'un indice de ``FaceList`` pour ``AddPolyfaceMesh``. HYPOTHÈSE
+#: W-86: la documentation ActiveX dit seulement « array of integers », mais
+#: l'exemple VBA d'Autodesk déclare ``Dim FaceList() As Integer``, le type
+#: 16 bits de VBA. Vérifié défensivement ici plutôt que découvert sur un
+#: dessin réel: un indice hors domaine échouerait au mieux, déborderait
+#: silencieusement au pire.
+_POLYFACE_MAX_INDEX = 32767
 
 
 # ---------------------------------------------------------------------------
@@ -1128,6 +1139,8 @@ class AcadComBackend(CadBackend):
             return self._add_dim_aligned(model_space, operation)
         if isinstance(operation, AddBlockRef):
             return self._add_block_ref(doc, model_space, operation, context)
+        if isinstance(operation, AddMesh):
+            return self._add_mesh(model_space, operation)
         raise InvalidParameter(
             f"Opération inconnue du backend AutoCAD: {type(operation).__name__}",
             backend=self.name,
@@ -2337,6 +2350,13 @@ class AcadComBackend(CadBackend):
         * **ARC** — ``ArcLength`` seulement. Un arc est une ligne courbe, il n'a
           pas d'aire ; AutoCAD sait pourtant rendre celle du segment circulaire
           délimité par la corde, qui ne correspond à aucune surface du dessin.
+        * **AcDbPolyFaceMesh** — ``vertices`` et ``faces``, les comptes bruts
+          exposés par ActiveX (``NumberOfVertices``, ``NumberOfFaces``). Ce ne
+          sont **pas** des clés de ``base.MEASURE_KEYS`` : un volume n'a ni
+          longueur ni aire au sens de ce dictionnaire, et personne ne les
+          additionne. Elles ne servent qu'à distinguer un maillage vide d'un
+          maillage réellement écrit, ce que le backend ``ezdxf`` ne publie pas
+          non plus. Voir W-89.
         * **tout le reste** — rien. Une hachure, un texte, une occurrence de
           bloc ou une cote ne reçoivent aucune clé.
 
@@ -2373,6 +2393,13 @@ class AcadComBackend(CadBackend):
                 area = self._number_property(entity, "Area")
                 if area is not None:
                     measures["area"] = area
+        elif object_name == "AcDbPolyFaceMesh":
+            vertex_count = self._number_property(entity, "NumberOfVertices")
+            if vertex_count is not None:
+                measures["vertices"] = int(vertex_count)
+            face_count = self._number_property(entity, "NumberOfFaces")
+            if face_count is not None:
+                measures["faces"] = int(face_count)
 
         return measures
 
@@ -2953,6 +2980,134 @@ class AcadComBackend(CadBackend):
             or details.get("hresult_hex")
             or str(exc)
         )
+
+    # -- volumes (maillages) ------------------------------------------------
+
+    def _add_mesh(
+        self, model_space: Any, op: AddMesh
+    ) -> tuple[list[tuple[Any, str]], list[str]]:
+        """Crée un volume par une maille de facettes: la route ``AddPolyfaceMesh``.
+
+        ``model.ops.AddMesh`` donne des sommets et des facettes exprimées par
+        indices de sommet, exactement la forme attendue par
+        ``AddPolyfaceMesh(VerticesList, FaceList)``. Trois routes ActiveX
+        permettent de matérialiser un volume, une seule convient:
+
+        * **``AddPolyfaceMesh``, retenue.** Une seule entité pour tout le
+          prisme, sélectionnable et effaçable d'un clic, alignée sur ce que
+          fait déjà ce backend pour une polyligne plutôt que des segments
+          indépendants (voir :meth:`_lightweight_polyline`).
+        * **``Add3DFace``, écartée.** Pose une facette à la fois: un mur
+          élevé sur plusieurs tranches (allège, linteau) produirait des
+          dizaines d'entités indépendantes pour un seul volume — aussi
+          lourd à sélectionner, déplacer ou effacer qu'un rectangle fait de
+          quatre segments, le bug historique que ``_lightweight_polyline``
+          corrige déjà en deux dimensions.
+        * **``AddMesh`` au sens ActiveX (une grille M x N, via ``Add3DMesh``),
+          écartée.** Elle décrit une nappe rectangulaire régulière: un
+          prisme droit, dont les faces latérales et les capuchons ne
+          forment pas une grille, ne s'y coule pas.
+
+        Aucune de ces trois routes n'a pu être exercée devant AutoCAD: ce
+        choix est documenté en détail, avec son geste de vérification, sous
+        W-83 à W-89 de ``docs/windows-checklist.md``.
+
+        La conversion d'indices est déléguée à :meth:`_polyface_indices`, dont
+        la docstring détaille le piège principal — la base un et non zéro —
+        qui ne lève aucune erreur en cas d'hypothèse fausse: il déforme le
+        volume en silence. Voir W-84.
+
+        Rend une seule entité: ``op.style`` s'applique donc au volume entier,
+        jamais facette par facette.
+        """
+        vertices_flat: list[float] = []
+        for sommet in op.vertices:
+            vertices_flat.extend(float(c) for c in sommet)
+
+        face_indices = self._polyface_indices(op.faces)
+        if any(indice > _POLYFACE_MAX_INDEX for indice in face_indices):
+            # Défensif, pas une hypothèse COM: voir la justification de
+            # _POLYFACE_MAX_INDEX. On préfère lever ici, avant tout aller-
+            # retour, plutôt que de découvrir un débordement sur un dessin réel.
+            raise InvalidGeometry(
+                "Maillage trop grand pour AddPolyfaceMesh: un indice de "
+                f"facette dépasse {_POLYFACE_MAX_INDEX}, la borne d'un entier "
+                "16 bits",
+                vertices=len(op.vertices),
+                faces=len(op.faces),
+            )
+
+        try:
+            mesh = model_space.AddPolyfaceMesh(
+                self._doubles(vertices_flat), self._shorts(face_indices)
+            )
+        except self._com_error as exc:
+            raise self._fail(
+                exc,
+                "Maillage refusé par AutoCAD (AddPolyfaceMesh) — la méthode "
+                "exige au moins quatre sommets et au moins une facette",
+                vertices=len(op.vertices),
+                faces=len(op.faces),
+            ) from exc
+
+        return [(mesh, "mesh")], []
+
+    @staticmethod
+    def _polyface_indices(faces: Sequence[tuple[int, ...]]) -> list[int]:
+        """Convertit les facettes du modèle en ``FaceList`` d'``AddPolyfaceMesh``.
+
+        Trois règles, tirées de la documentation ActiveX de la méthode et
+        d'un exemple VBA publié par Autodesk, aucune exercée devant AutoCAD:
+
+        * **Base un, pas base zéro — le piège principal de cette route.** Le
+          modèle numérote ses sommets à partir de zéro (``vertices[0]`` est
+          le premier). ``AddPolyfaceMesh`` numérote à partir de un. Chaque
+          indice est donc incrémenté avant l'envoi. Une hypothèse fausse ici
+          ne fait lever aucune erreur à AutoCAD: ``FaceList`` resterait un
+          tableau d'entiers valide, simplement décalé d'un cran, et chaque
+          facette pointerait sur le sommet voisin de celui voulu. Le volume
+          obtenu serait déformé, pas absent — un défaut silencieux qu'aucun
+          ``BatchResult.failures`` ne rapporterait. Voir W-84.
+        * **Groupes de quatre stricts.** La documentation ActiveX impose que
+          ``FaceList`` soit un multiple de quatre: une facette occupe
+          toujours quatre positions. Une facette triangulaire du modèle est
+          donc fermée en répétant son dernier sommet, comme le format DXF
+          POLYFACE MESH sous-jacent le fait lui-même pour une face à moins de
+          quatre côtés. Voir W-85.
+        * **Plus de quatre sommets.** ``ops/volume.py`` ne construit
+          aujourd'hui que des facettes à trois ou quatre sommets pour un mur
+          ou une boîte, mais rien dans ``model.ops.AddMesh`` ne l'impose: par
+          exemple ``ops.volume.slab`` accepte un contour arbitraire, dont la
+          face inférieure et la face supérieure héritent le nombre de
+          sommets. Une telle facette est découpée ici en éventail depuis son
+          premier sommet — ``n - 2`` triangles pour un polygone à ``n``
+          sommets —, chaque triangle obtenu étant refermé par la règle
+          précédente. **Limite assumée**: un contour non convexe produirait
+          un éventail qui sort de la facette. ``ops/volume.py`` ne construit
+          aujourd'hui que des contours convexes (rectangles), donc le cas ne
+          se présente pas en pratique; un appelant direct de ce backend avec
+          un contour non convexe devrait trianguler lui-même en amont.
+        """
+        indices: list[int] = []
+        for facette in faces:
+            groupes: tuple[tuple[int, ...], ...]
+            if len(facette) <= 4:
+                groupes = (facette,)
+            else:
+                premier = facette[0]
+                groupes = tuple(
+                    (premier, facette[i], facette[i + 1])
+                    for i in range(1, len(facette) - 1)
+                )
+            for groupe in groupes:
+                un_indexe = [indice + 1 for indice in groupe]
+                if len(un_indexe) == 3:
+                    # Un côté manquant se referme en répétant le dernier
+                    # sommet: convention du format POLYFACE MESH, reprise ici
+                    # pour une facette à moins de quatre côtés.
+                    un_indexe.append(un_indexe[-1])
+                indices.extend(un_indexe)
+        return indices
 
 
 class _NeverRaised(Exception):

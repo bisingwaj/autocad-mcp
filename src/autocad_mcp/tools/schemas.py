@@ -47,6 +47,7 @@ __all__ = [
     "MAX_RENDER_PIXELS",
     "MEASURE_MODES",
     "MIN_RENDER_PIXELS",
+    "RENDER_PROJECTIONS",
     "ToolSpec",
     "build_catalog",
     "tool_names",
@@ -96,6 +97,11 @@ MEASURE_MODES = (
     "nearest",
     "in_window",
 )
+
+#: Projections de ``render_view``. "plan" est la vue de dessus déjà produite
+#: depuis les débuts du projet; "iso" relit les volumes du document, ce qui
+#: exige que build_structure en ait construit au moins un.
+RENDER_PROJECTIONS = ("plan", "iso")
 
 #: Noms des calques normalisés, cités dans les descriptions pour que le modèle
 #: n'invente pas de nomenclature.
@@ -217,6 +223,22 @@ def _angle_deg(description: str, example: str) -> dict[str, Any]:
         "description": (
             f"{description} En **degrés**, sens trigonométrique direct, zéro vers l'est. "
             f"Exemple: {example}."
+        ),
+    }
+
+
+def _level(description: str, example: str = "0") -> dict[str, Any]:
+    """Une altitude signée: pas de plancher à zéro, un sous-sol descend en dessous.
+
+    Distincte d'une épaisseur ou d'une hauteur, qui sont toujours positives: un
+    niveau peut légitimement être négatif, pour une dalle de sous-sol.
+    """
+    return {
+        "type": "number",
+        "default": 0,
+        "description": (
+            f"{description} {_UNIT_NOTE} Altitude signée: positive au-dessus du sol fini, "
+            f"négative en sous-sol. Omise: zéro, le niveau du sol fini. Exemple: {example}."
         ),
     }
 
@@ -519,12 +541,16 @@ def _opening_deg() -> dict[str, Any]:
     }
 
 
-def _openings() -> dict[str, Any]:
+def _openings(context: str = "wall") -> dict[str, Any]:
     """Baies percées dans une enfilade de murs.
 
     Une baie n'est pas un symbole posé par-dessus le mur: elle le coupe en deux
     tronçons pleins. C'est pourquoi elle se déclare **avec** le réseau de murs
     et non après lui.
+
+    ``context`` choisit la phrase de fin, seule partie qui change selon
+    l'élément qui reçoit ce champ: percer un plan, élever un volume, ou coter
+    ce qui existe déjà sans rien dessiner de nouveau.
     """
     item = {
         "type": "object",
@@ -576,14 +602,34 @@ def _openings() -> dict[str, Any]:
         "required": ["segment", "position", "width"],
         "additionalProperties": False,
     }
+    if context == "volume":
+        trailer = (
+            "Chacune ouvre réellement le volume: une fenêtre garde son allège et son "
+            "linteau, une porte garde son linteau seul jusqu'au sol, un passage reste "
+            "libre du sol au plafond. Omise ou vide: les murs restent pleins du sol au "
+            "plafond."
+        )
+    elif context == "dimensions":
+        trailer = (
+            "Sert uniquement à situer les lignes de cote des percements et de leurs "
+            "axes: rien n'est dessiné ni percé ici. Reprendre EXACTEMENT les mêmes baies "
+            "que celles données à wall_network pour ce plan, sinon les cotes ne "
+            "correspondront pas à la maçonnerie. Omise ou vide: seule la longueur hors "
+            "tout de chaque mur est cotée."
+        )
+    else:  # wall
+        trailer = (
+            "Chacune coupe réellement le mur en deux tronçons au lieu d'y superposer un "
+            "symbole. Omise ou vide: les murs restent pleins."
+        )
     return {
         "type": "array",
         "maxItems": MAX_BATCH_ITEMS,
         "items": item,
         "description": (
-            "Baies à percer dans cette enfilade. Chacune coupe réellement le mur en "
-            "deux tronçons au lieu d'y superposer un symbole. Omise ou vide: les murs "
-            "restent pleins. Exemple: "
+            "Baies de cette enfilade: porte, fenêtre ou passage. "
+            + trailer
+            + " Exemple: "
             "[{\"segment\": 0, \"position\": 0.5, \"width\": 0.9, \"kind\": \"door\"}]."
         ),
     }
@@ -817,6 +863,164 @@ def _structure_variants() -> list[dict[str, Any]]:
                 "color": _color(),
             },
             ["position", "text"],
+        ),
+        _variant(
+            "element",
+            "wall_volume",
+            (
+                "Élève en VOLUME le réseau de murs que wall_network trace en plan: mêmes "
+                "points, même fermeture, mêmes épaisseurs, mêmes baies, plus une hauteur. "
+                "Appeler les deux avec EXACTEMENT les mêmes valeurs donne un plan et un "
+                "volume qui coïncident trait pour trait, la même géométrie élevée dans le "
+                "troisième axe. Chaque baie devient un percement réel: une fenêtre garde "
+                "son allège et son linteau, une porte garde son linteau seul et son passage "
+                "descend jusqu'au sol, un passage libre reste ouvert du sol au plafond.\n\n"
+                "À utiliser pour donner une hauteur à un plan déjà tracé, avant d'appeler "
+                "render_view en projection iso: sans volume construit, la vue en trois "
+                "dimensions n'a rien à montrer."
+            ),
+            {
+                "points": _points(
+                    "Points de passage de l'axe des murs, identiques à ceux donnés à "
+                    "wall_network pour que le volume coïncide avec le plan."
+                ),
+                "closed": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Referme l'enfilade du dernier point vers le premier, exactement "
+                        "comme le champ closed de wall_network."
+                    ),
+                },
+                "thickness": _thickness("des murs"),
+                "openings": _openings("volume"),
+                "height": _length(
+                    "Hauteur du volume, du sol au sommet des murs. Omise: la hauteur "
+                    "sous plafond courante, 2,50 m convertie dans l'unité du document.",
+                    "2.5",
+                ),
+                "layer": _layer("WALLS"),
+                "color": _color(),
+            },
+            ["points"],
+        ),
+        _variant(
+            "element",
+            "slab",
+            (
+                "Dalle de plancher pleine: un prisme élevé sous un contour, dont le "
+                "dessus affleure le niveau z, de sorte que des murs élevés depuis ce même "
+                "niveau reposent dessus au lieu de le traverser.\n\n"
+                "À utiliser pour donner un sol à un volume, avant wall_volume, avec le "
+                "contour extérieur du même plan."
+            ),
+            {
+                "contour": _points(
+                    "Sommets du contour de la dalle, dans l'ordre, typiquement le "
+                    "contour extérieur du plan.",
+                    minimum=3,
+                ),
+                "thickness": _length(
+                    "Épaisseur de la dalle. Omise: l'épaisseur courante de plancher, "
+                    "0,20 m convertie dans l'unité du document.",
+                    "0.2",
+                ),
+                "z": _level("Niveau du dessus de la dalle, là où les murs viendront reposer."),
+                "layer": _layer("STRUCTURE"),
+            },
+            ["contour"],
+        ),
+        _variant(
+            "element",
+            "box",
+            (
+                "Boîte droite entre deux coins en plan, élevée du niveau z sur la hauteur "
+                "donnée: une silhouette de meuble ou d'appareil, pas un modèle de "
+                "fabricant. C'est ce qui permet de poser du mobilier en volume.\n\n"
+                "À utiliser pour peupler une vue en trois dimensions une fois les murs et "
+                "la dalle posés: un lit, une table ou un plan de travail rendent l'échelle "
+                "du logement plus lisible qu'un volume vide."
+            ),
+            {
+                "corner1": _point2("Premier coin en plan."),
+                "corner2": _point2("Coin opposé en plan.", "[1.0, 0.6]"),
+                "height": _length(
+                    "Hauteur de la boîte, du niveau z jusqu'à son sommet.", "0.45"
+                ),
+                "z": _level("Niveau de la base de la boîte."),
+                "layer": _layer("FURNITURE"),
+                "color": _color(),
+            },
+            ["corner1", "corner2", "height"],
+        ),
+        _variant(
+            "element",
+            "dimensions",
+            (
+                "Cote un réseau de murs entier, façade par façade: d'abord les "
+                "percements tableau par tableau, puis les axes des baies, puis la "
+                "longueur hors tout, chaque ligne se déportant un peu plus loin que la "
+                "précédente pour rester lisible. C'est le pendant coté de wall_network: "
+                "donnez-lui les MÊMES points, la MÊME fermeture, les MÊMES baies et la "
+                "MÊME épaisseur que le plan à coter, sans quoi les cotes ne correspondront "
+                "pas à la maçonnerie.\n\n"
+                "À utiliser une fois les murs tracés, pour produire les cotes qu'un plan "
+                "d'exécution exige, au lieu de positionner chaque ligne de cote à la main."
+            ),
+            {
+                "points": _points(
+                    "Points de passage de l'axe des murs, identiques à ceux du plan à coter."
+                ),
+                "closed": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Referme l'enfilade du dernier point vers le premier, exactement "
+                        "comme le champ closed de wall_network."
+                    ),
+                },
+                "thickness": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": (
+                        "Épaisseur des murs cotés, qui fixe le déport de la première "
+                        f"ligne de cote hors de la maçonnerie. {_UNIT_NOTE} Doit "
+                        "correspondre à l'épaisseur donnée à wall_network pour ce même "
+                        "plan. Omise: l'épaisseur de maçonnerie courante, 0,20 m "
+                        "convertie dans l'unité du document. Exemple: 0.2."
+                    ),
+                },
+                "openings": _openings("dimensions"),
+                "segments": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": (
+                            "Rang d'un mur de l'enfilade, dans la même numérotation que "
+                            "openings.segment. Exemple: 0."
+                        ),
+                    },
+                    "maxItems": MAX_BATCH_ITEMS,
+                    "description": (
+                        "Rangs des murs à coter. Omis: tous les murs de l'enfilade sont "
+                        "cotés, ce qui est le cas courant. À restreindre pour ne coter "
+                        "qu'une façade sans encombrer le reste du plan. Exemple: [0, 2]."
+                    ),
+                },
+                "outside": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Place les lignes de cote à l'extérieur du contour plutôt qu'à "
+                        "l'intérieur, où elles recouvriraient les pièces de chiffres. "
+                        "Sans effet notable sur une enfilade ouverte, où l'extérieur est "
+                        "affaire de convention plutôt que de géométrie."
+                    ),
+                },
+                "layer": _layer("DIMENSIONS"),
+            },
+            ["points"],
         ),
     ]
 
@@ -1138,6 +1342,14 @@ def build_catalog(config: Config) -> tuple[ToolSpec, ...]:
                 "vous dessinez à l'aveugle.\n\n"
                 "À appeler aussi avant de corriger un dessin existant, pour savoir ce "
                 "qu'il contient.\n\n"
+                "DEUX PROJECTIONS. \"plan\" (défaut) est la vue de dessus, celle qui "
+                "convient à un dessin en deux dimensions. \"iso\" relit les VOLUMES du "
+                "document et rend une vue en perspective depuis un point de vue "
+                "réglable: à appeler après avoir élevé des murs avec build_structure "
+                "(wall_volume, slab, box), pour juger de hauteurs, d'allèges ou de "
+                "linteaux qu'un plan ne montre pas. Un document sans volume ou un moteur "
+                "qui n'en garde pas la trace refuse la projection iso avec une erreur "
+                "explicite plutôt qu'une image vide qu'on croirait correcte.\n\n"
                 "Le cadrage est automatique et centré sur le contenu; un dessin vide rend "
                 "une image vide, ce qui n'est pas une erreur. Exige un moteur capable de "
                 "rendu: le backend DXF le fait, le backend AutoCAD non, puisque l'écran "
@@ -1159,6 +1371,38 @@ def build_catalog(config: Config) -> tuple[ToolSpec, ...]:
                         "maximum": MAX_RENDER_PIXELS,
                         "default": render_height,
                         "description": f"Hauteur de l'image en pixels. Défaut {render_height}.",
+                    },
+                    "projection": {
+                        "type": "string",
+                        "enum": list(RENDER_PROJECTIONS),
+                        "default": "plan",
+                        "description": (
+                            "Point de vue du rendu. \"plan\" est la vue de dessus, celle "
+                            "du dessin en deux dimensions. \"iso\" est une vue en volume, "
+                            "en perspective, qui exige des volumes déjà construits par "
+                            "build_structure (wall_volume, slab, box): sans eux, ou sur "
+                            "un moteur qui n'expose pas de document, l'appel échoue avec "
+                            "une erreur qui le dit plutôt que de rendre une image vide."
+                        ),
+                    },
+                    "elevation_deg": {
+                        "type": "number",
+                        "description": (
+                            "Hauteur du point de vue au-dessus de l'horizon, en "
+                            "**degrés**, pour la projection iso seulement; sans effet en "
+                            "projection plan. Zéro regarde à l'horizontale, 90 regarde le "
+                            "dessin depuis le dessus. Omis: l'angle isométrique par "
+                            "défaut du serveur, environ 26 degrés. Exemple: 26."
+                        ),
+                    },
+                    "azimuth_deg": {
+                        "type": "number",
+                        "description": (
+                            "Orientation du point de vue autour du bâtiment, en "
+                            "**degrés**, pour la projection iso seulement; sans effet en "
+                            "projection plan. Omis: l'azimut isométrique par défaut du "
+                            "serveur, environ -56 degrés. Exemple: -56."
+                        ),
                     },
                 },
                 "additionalProperties": False,
@@ -1210,8 +1454,8 @@ def build_catalog(config: Config) -> tuple[ToolSpec, ...]:
             title="Construire un lot d'éléments de bâtiment",
             description=(
                 "Construit une LISTE d'éléments de bâtiment en un seul lot: réseaux de "
-                "murs percés de leurs baies, murs isolés, portes, fenêtres, pièces et "
-                "étiquettes.\n\n"
+                "murs percés de leurs baies, murs isolés, portes, fenêtres, pièces, "
+                "étiquettes, volumes élevés en trois dimensions et cotation automatique.\n\n"
                 "À utiliser pour tout ce qui relève du plan d'architecture, de préférence à "
                 "draw, qui ne connaît que la géométrie nue. Chaque "
                 "élément est posé sur son calque normalisé, un mur épais est une polyligne "
@@ -1221,6 +1465,12 @@ def build_catalog(config: Config) -> tuple[ToolSpec, ...]:
                 "le seul élément qui raccorde les angles et qui perce réellement la "
                 "maçonnerie; wall, wall_run, door_in_wall et window ne servent plus que "
                 "pour un objet isolé ou un symbole posé sur un mur existant.\n\n"
+                "POUR LA TROISIÈME DIMENSION, wall_volume élève le même plan en volume "
+                "quand on lui donne les mêmes points, slab pose une dalle sous un contour, "
+                "et box pose une silhouette de meuble: c'est ce que render_view en "
+                "projection iso vient ensuite montrer.\n\n"
+                "POUR LA COTATION, dimensions cote un réseau de murs entier, façade par "
+                "façade, à partir des mêmes points et des mêmes baies que wall_network.\n\n"
                 "Toutes les longueurs omises prennent une valeur par défaut convertie dans "
                 "l'unité du document: un mur de vingt centimètres reste un mur de vingt "
                 "centimètres que le dessin soit en mètres ou en millimètres.\n\n"

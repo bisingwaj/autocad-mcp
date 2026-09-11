@@ -23,6 +23,7 @@ construits explicitement, donc aucun backend interactif n'est sollicité et aucu
 from __future__ import annotations
 
 import io
+import math
 import random
 from typing import TYPE_CHECKING, Any
 
@@ -274,3 +275,144 @@ def render_png(
     finally:
         figure.clf()
     return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Vue en volume
+# ---------------------------------------------------------------------------
+
+#: Direction de l'éclairage, choisie pour que les trois faces d'un angle
+#: sortant se distinguent nettement les unes des autres.
+_SOLEIL: tuple[float, float, float] = (-0.38, -0.55, 0.74)
+
+#: Élévation et azimut de la vue isométrique, en degrés.
+ISO_ELEVATION = 26.0
+ISO_AZIMUTH = -56.0
+
+
+def render_scene_png(
+    scene: dict[str, Any],
+    width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT,
+    *,
+    elevation: float = ISO_ELEVATION,
+    azimuth: float = ISO_AZIMUTH,
+    background: str = BACKGROUND,
+    dpi: int = DPI,
+) -> bytes:
+    """Rend une scène de volumes en image, vue depuis un point donné.
+
+    Le pendant en trois dimensions de :func:`render_png`. Sans lui, un modèle
+    qui élève des murs travaille en aveugle sur la hauteur: il verrait son plan
+    mais jamais son volume, et une allège posée au mauvais niveau ne se
+    signalerait nulle part.
+
+    Args:
+        scene: la scène rendue par ``viewer.to_scene``.
+        elevation: hauteur du point de vue, en degrés au-dessus de l'horizon.
+        azimuth: orientation du point de vue, en degrés.
+
+    Raises:
+        InvalidParameter: dimensions ou résolution hors bornes.
+        BackendUnavailable: matplotlib absent.
+    """
+    if width <= 0 or height <= 0:
+        raise InvalidParameter("Dimensions de rendu invalides", width=width, height=height)
+    if dpi <= 0:
+        raise InvalidParameter("Résolution invalide", dpi=dpi)
+
+    figure_cls, canvas_cls = _load_matplotlib()
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    teintes = {calque["name"]: calque["color"] for calque in scene.get("layers", [])}
+    facettes: list[list[tuple[float, float, float]]] = []
+    couleurs: list[str] = []
+
+    for volume in scene.get("meshes", ()):
+        sommets = volume["vertices"]
+        teinte = teintes.get(volume["layer"], "#b8b2a4")
+        for facette in volume["faces"]:
+            points = [tuple(sommets[i]) for i in facette]
+            if len(points) < 3:
+                continue
+            facettes.append(points)
+            couleurs.append(_ombrer(points, teinte))
+
+    figure = figure_cls(figsize=(width / dpi, height / dpi), dpi=dpi)
+    canvas_cls(figure)
+    figure.patch.set_facecolor(background)
+
+    axes = figure.add_subplot(111, projection="3d")
+    axes.set_facecolor(background)
+    axes.set_axis_off()
+
+    if facettes:
+        axes.add_collection3d(
+            Poly3DCollection(
+                facettes,
+                facecolors=couleurs,
+                edgecolors="#3a3d42",
+                linewidths=0.35,
+            )
+        )
+
+    _cadrer_volume(axes, scene)
+    axes.view_init(elev=elevation, azim=azimuth)
+
+    try:
+        buffer = io.BytesIO()
+        figure.savefig(
+            buffer, format="png", dpi=dpi, facecolor=background, bbox_inches="tight"
+        )
+        return buffer.getvalue()
+    finally:
+        figure.clf()
+
+
+def _ombrer(points: list[tuple[float, float, float]], teinte: str) -> str:
+    """Éclaircit ou assombrit une teinte selon l'orientation de la facette.
+
+    Sans cette variation, toutes les faces sortent de la même couleur et le
+    volume se lit comme une silhouette plate.
+    """
+    a, b, c = points[0], points[1], points[2]
+    u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+    v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+    normale = (
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    )
+    longueur = math.sqrt(sum(k * k for k in normale)) or 1.0
+    lambert = abs(sum(n * s for n, s in zip(normale, _SOLEIL, strict=True))) / longueur
+    clarte = 0.45 + 0.55 * lambert
+
+    rouge, vert, bleu = (int(teinte.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4))
+    if clarte >= 0.78:
+        part = min(1.0, (clarte - 0.78) * 1.6)
+        melange = (255, 255, 255)
+    else:
+        part = min(1.0, (0.78 - clarte) * 1.1)
+        melange = (40, 42, 46)
+    canaux = [
+        round(depart + (cible - depart) * part)
+        for depart, cible in zip((rouge, vert, bleu), melange, strict=True)
+    ]
+    return "#{:02x}{:02x}{:02x}".format(*canaux)
+
+
+def _cadrer_volume(axes: Any, scene: dict[str, Any]) -> None:
+    """Donne aux trois axes la même échelle, centrée sur le bâtiment.
+
+    Sans égalisation, matplotlib étire chaque axe indépendamment et un mur de
+    deux mètres cinquante paraît aussi haut qu'un bâtiment de dix mètres de
+    long, ce qui rend le rendu inutilisable pour juger des proportions.
+    """
+    bornes = scene.get("bounds", {})
+    mini = list(bornes.get("min", [0.0, 0.0, 0.0]))
+    maxi = list(bornes.get("max", [1.0, 1.0, 1.0]))
+    etendue = max((maxi[i] - mini[i] for i in range(3)), default=1.0) or 1.0
+    demi = etendue / 2.0
+    for index, poseur in enumerate((axes.set_xlim, axes.set_ylim, axes.set_zlim)):
+        milieu = (mini[index] + maxi[index]) / 2.0
+        poseur(milieu - demi, milieu + demi)

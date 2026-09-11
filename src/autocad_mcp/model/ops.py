@@ -249,6 +249,31 @@ class DefineBlock:
 
 
 @dataclass(frozen=True, slots=True)
+class AddMesh:
+    """Maillage de facettes: la troisième dimension du projet.
+
+    Un volume est décrit par ses sommets et par les facettes qui les relient,
+    chaque facette étant la suite des indices de ses sommets. C'est la forme la
+    plus simple qu'un logiciel de CAO relit sans ambiguïté, et la seule qui se
+    convertisse telle quelle vers un visualiseur web.
+
+    Le plan en deux dimensions reste la source de vérité: un volume s'obtient
+    en donnant une hauteur à des contours déjà tracés, jamais en dessinant
+    deux fois la même chose.
+    """
+
+    vertices: tuple[Point3, ...]
+    #: Facettes, chacune donnant les indices de ses sommets dans ``vertices``.
+    #: Au moins trois indices, sans plafond: les faces latérales d'un prisme en
+    #: ont quatre, mais son dessus et son dessous en ont autant que le contour.
+    #: Une dalle à cinq côtés porte donc des facettes à cinq sommets, et un
+    #: format qui n'accepte que les quadrilatères doit les découper lui-même.
+    faces: tuple[tuple[int, ...], ...]
+    style: Style = field(default_factory=Style)
+    kind: Literal["mesh"] = "mesh"
+
+
+@dataclass(frozen=True, slots=True)
 class EnsureLayer:
     """Crée le calque s'il n'existe pas, sans jamais écraser un calque existant."""
 
@@ -271,6 +296,7 @@ Operation: TypeAlias = (
     | AddHatch
     | AddDimAligned
     | AddBlockRef
+    | AddMesh
     | DefineBlock
     | EnsureLayer
 )
@@ -364,6 +390,28 @@ def validate(op: Operation) -> None:
 
     if isinstance(op, DefineBlock):
         _validate_block_definition(op)
+
+    if isinstance(op, AddMesh):
+        if len(op.vertices) < 3:
+            raise InvalidGeometry(
+                "Un maillage demande au moins trois sommets", count=len(op.vertices)
+            )
+        if not op.faces:
+            raise InvalidGeometry("Maillage sans facette")
+        borne = len(op.vertices)
+        for rang, facette in enumerate(op.faces):
+            if len(facette) < 3:
+                raise InvalidGeometry(
+                    "Facette à moins de trois sommets", face=rang, count=len(facette)
+                )
+            for indice in facette:
+                if not 0 <= indice < borne:
+                    raise InvalidGeometry(
+                        "Facette qui désigne un sommet inexistant",
+                        face=rang,
+                        index=indice,
+                        vertices=borne,
+                    )
 
     if isinstance(op, EnsureLayer):
         if not op.name.strip():

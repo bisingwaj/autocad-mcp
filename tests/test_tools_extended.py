@@ -902,6 +902,389 @@ def test_the_command_enum_follows_the_configuration() -> None:
 
 
 # ---------------------------------------------------------------------------
+# build_structure: volumes (wall_volume, slab, box) et cotation (dimensions)
+# ---------------------------------------------------------------------------
+
+
+def meshes_of(backend: EzdxfBackend) -> list[Any]:
+    return list(backend.document.modelspace().query("MESH"))
+
+
+def test_wall_volume_takes_the_same_plan_as_wall_network(
+    tools: ToolHandlers, backend: EzdxfBackend
+) -> None:
+    """Mêmes points, mêmes baies: wall_volume élève ce que wall_network trace."""
+    points = [[0, 0], [4, 0], [4, 3], [0, 3]]
+    openings = [{"segment": 0, "position": 0.5, "width": 0.9, "kind": "door"}]
+    result = call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {
+                    "element": "wall_network",
+                    "points": points,
+                    "closed": True,
+                    "openings": openings,
+                },
+                {
+                    "element": "wall_volume",
+                    "points": points,
+                    "closed": True,
+                    "openings": openings,
+                },
+            ]
+        },
+    )
+    assert result.is_error is False
+    assert meshes_of(backend), "wall_volume doit produire au moins un volume"
+
+
+def test_wall_volume_defaults_to_the_standard_ceiling_height(
+    tools: ToolHandlers, backend: EzdxfBackend
+) -> None:
+    result = call(
+        tools,
+        "build_structure",
+        {"elements": [{"element": "wall_volume", "points": [[0, 0], [4, 0]]}]},
+    )
+    assert result.is_error is False
+    zs = [v[2] for mesh in meshes_of(backend) for v in mesh.vertices]
+    assert min(zs) == pytest.approx(0.0)
+    assert max(zs) == pytest.approx(2.5)
+
+
+def test_wall_volume_uses_a_given_height(tools: ToolHandlers, backend: EzdxfBackend) -> None:
+    result = call(
+        tools,
+        "build_structure",
+        {"elements": [{"element": "wall_volume", "points": [[0, 0], [4, 0]], "height": 3.2}]},
+    )
+    assert result.is_error is False
+    zs = [v[2] for mesh in meshes_of(backend) for v in mesh.vertices]
+    assert max(zs) == pytest.approx(3.2)
+
+
+def test_wall_volume_rejects_a_non_positive_height(tools: ToolHandlers) -> None:
+    """L'échec est rapporté à la construction, pas laissé passer en silence."""
+    result = call(
+        tools,
+        "build_structure",
+        {"elements": [{"element": "wall_volume", "points": [[0, 0], [4, 0]], "height": 0}]},
+    )
+    assert result.is_error is True
+    failure = result.payload["failures"][0]
+    assert failure["stage"] == "build"
+    assert failure["code"] == InvalidParameter.code
+
+
+def test_slab_sits_below_the_given_level(tools: ToolHandlers, backend: EzdxfBackend) -> None:
+    result = call(
+        tools,
+        "build_structure",
+        {"elements": [{"element": "slab", "contour": [[0, 0], [4, 0], [4, 3], [0, 3]]}]},
+    )
+    assert result.is_error is False
+    zs = [v[2] for mesh in meshes_of(backend) for v in mesh.vertices]
+    assert max(zs) == pytest.approx(0.0)
+    assert min(zs) == pytest.approx(-0.2)
+
+
+def test_slab_lands_on_the_structure_layer(tools: ToolHandlers, backend: EzdxfBackend) -> None:
+    call(
+        tools,
+        "build_structure",
+        {"elements": [{"element": "slab", "contour": [[0, 0], [4, 0], [4, 3], [0, 3]]}]},
+    )
+    assert {mesh.dxf.layer for mesh in meshes_of(backend)} == {"STRUCTURE"}
+
+
+def test_slab_thickness_and_level_are_configurable(
+    tools: ToolHandlers, backend: EzdxfBackend
+) -> None:
+    result = call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {
+                    "element": "slab",
+                    "contour": [[0, 0], [4, 0], [4, 3], [0, 3]],
+                    "thickness": 0.3,
+                    "z": -2.5,
+                }
+            ]
+        },
+    )
+    assert result.is_error is False
+    zs = [v[2] for mesh in meshes_of(backend) for v in mesh.vertices]
+    assert max(zs) == pytest.approx(-2.5)
+    assert min(zs) == pytest.approx(-2.8)
+
+
+def test_box_lands_on_the_furniture_layer_by_default(
+    tools: ToolHandlers, backend: EzdxfBackend
+) -> None:
+    result = call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {"element": "box", "corner1": [0, 0], "corner2": [1.0, 0.6], "height": 0.45}
+            ]
+        },
+    )
+    assert result.is_error is False
+    meshes = meshes_of(backend)
+    assert len(meshes) == 1
+    assert meshes[0].dxf.layer == "FURNITURE"
+    zs = [v[2] for v in meshes[0].vertices]
+    assert min(zs) == pytest.approx(0.0)
+    assert max(zs) == pytest.approx(0.45)
+
+
+def test_box_honours_a_custom_layer_and_level(
+    tools: ToolHandlers, backend: EzdxfBackend
+) -> None:
+    result = call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {
+                    "element": "box",
+                    "corner1": [0, 0],
+                    "corner2": [1.0, 0.6],
+                    "height": 0.9,
+                    "z": 0.4,
+                    "layer": "KITCHEN_ISLAND",
+                }
+            ]
+        },
+    )
+    assert result.is_error is False
+    mesh = meshes_of(backend)[0]
+    assert mesh.dxf.layer == "KITCHEN_ISLAND"
+    zs = [v[2] for v in mesh.vertices]
+    assert min(zs) == pytest.approx(0.4)
+    assert max(zs) == pytest.approx(1.3)
+
+
+def test_dimensions_adds_cotes_without_drawing_any_masonry(
+    tools: ToolHandlers, backend: EzdxfBackend
+) -> None:
+    """Le pendant coté de wall_network ne dessine ni ne perce rien."""
+    result = call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {
+                    "element": "dimensions",
+                    "points": [[0, 0], [4, 0], [4, 3], [0, 3]],
+                    "closed": True,
+                }
+            ]
+        },
+    )
+    assert result.is_error is False
+    layers = layers_of(backend)
+    assert "DIMENSIONS" in layers
+    assert "WALLS" not in layers
+    assert len(backend.document.modelspace().query("DIMENSION")) > 0
+
+
+def test_dimensions_segments_restricts_which_walls_are_cotes(
+    tools: ToolHandlers, backend: EzdxfBackend
+) -> None:
+    call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {
+                    "element": "dimensions",
+                    "points": [[0, 0], [4, 0], [4, 3], [0, 3]],
+                    "closed": True,
+                    "segments": [0],
+                }
+            ]
+        },
+    )
+    # Sans baie, une seule façade cotée donne une seule cote: sa longueur hors tout.
+    assert len(backend.document.modelspace().query("DIMENSION")) == 1
+
+
+def test_dimensions_shares_wall_networks_opening_validation(tools: ToolHandlers) -> None:
+    """Le même garde-fou que wall_network: un rang hors de l'enfilade est refusé."""
+    result = call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {
+                    "element": "dimensions",
+                    "points": [[0, 0], [4, 0]],
+                    "openings": [{"segment": 5, "position": 0.5, "width": 0.9}],
+                }
+            ]
+        },
+    )
+    assert result.is_error is True
+    failure = result.payload["failures"][0]
+    assert failure["stage"] == "build"
+    assert failure["code"] == InvalidParameter.code
+
+
+def test_volume_and_dimension_elements_validate_against_their_schema(
+    catalog: tuple[ToolSpec, ...],
+) -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = spec_of(catalog, "build_structure").input_schema
+    jsonschema.validate(
+        {
+            "elements": [
+                {
+                    "element": "wall_volume",
+                    "points": [[0, 0], [4, 0], [4, 3], [0, 3]],
+                    "closed": True,
+                    "thickness": 0.2,
+                    "height": 2.5,
+                    "openings": [
+                        {"segment": 0, "position": 0.5, "width": 0.9, "kind": "door"}
+                    ],
+                },
+                {
+                    "element": "slab",
+                    "contour": [[0, 0], [4, 0], [4, 3], [0, 3]],
+                    "thickness": 0.2,
+                    "z": 0,
+                },
+                {
+                    "element": "box",
+                    "corner1": [0.1, 0.1],
+                    "corner2": [1.0, 0.6],
+                    "height": 0.45,
+                },
+                {
+                    "element": "dimensions",
+                    "points": [[0, 0], [4, 0], [4, 3], [0, 3]],
+                    "closed": True,
+                    "segments": [0, 1],
+                    "outside": True,
+                },
+            ]
+        },
+        schema,
+    )
+
+
+# ---------------------------------------------------------------------------
+# render_view: projection iso
+# ---------------------------------------------------------------------------
+
+
+def test_render_view_defaults_to_the_plan_projection(tools: ToolHandlers) -> None:
+    pytest.importorskip("matplotlib")
+    call(
+        tools,
+        "build_structure",
+        {"elements": [{"element": "room", "corner1": [0, 0], "corner2": [4, 3], "name": "SALLE"}]},
+    )
+    result = call(tools, "render_view", {})
+    assert result.is_error is False
+    assert result.payload["projection"] == "plan"
+
+
+def test_render_view_iso_returns_an_image_once_a_volume_exists(tools: ToolHandlers) -> None:
+    pytest.importorskip("matplotlib")
+    call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {"element": "box", "corner1": [0, 0], "corner2": [1, 0.6], "height": 0.45}
+            ]
+        },
+    )
+    result = call(tools, "render_view", {"projection": "iso", "width": 400, "height": 300})
+    assert result.is_error is False
+    assert result.image_png is not None
+    assert result.image_png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert result.payload["projection"] == "iso"
+    assert result.payload["mesh_count"] >= 1
+
+
+def test_render_view_iso_accepts_elevation_and_azimuth(tools: ToolHandlers) -> None:
+    pytest.importorskip("matplotlib")
+    call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {"element": "box", "corner1": [0, 0], "corner2": [1, 0.6], "height": 0.45}
+            ]
+        },
+    )
+    result = call(
+        tools, "render_view", {"projection": "iso", "elevation_deg": 45, "azimuth_deg": 10}
+    )
+    assert result.is_error is False
+    assert result.payload["elevation_deg"] == 45
+    assert result.payload["azimuth_deg"] == 10
+
+
+def test_render_view_iso_without_any_volume_names_the_remedy(tools: ToolHandlers) -> None:
+    """Jamais une image vide qu'on croirait correcte: une erreur qui nomme le remède."""
+    pytest.importorskip("matplotlib")
+    call(tools, "draw", {"operations": [{"op": "line", "start": [0, 0], "end": [1, 1]}]})
+    result = call(tools, "render_view", {"projection": "iso"})
+    assert result.is_error is True
+    assert result.payload["code"] == "operation_failed"
+    assert "build_structure" in result.payload["details"]["remedy"]
+
+
+def test_render_view_iso_without_a_document_is_unsupported(
+    tools: ToolHandlers, backend: EzdxfBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un moteur qui ne garde pas de document accessible le dit, sans image vide."""
+    pytest.importorskip("matplotlib")
+    call(
+        tools,
+        "build_structure",
+        {
+            "elements": [
+                {"element": "box", "corner1": [0, 0], "corner2": [1, 0.6], "height": 0.45}
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        type(backend),
+        "document",
+        property(lambda self: (_ for _ in ()).throw(AttributeError())),
+    )
+    result = call(tools, "render_view", {"projection": "iso"})
+    assert result.is_error is True
+    assert result.payload["code"] == UnsupportedOperation.code
+    assert "plan" in result.payload["details"]["remedy"]
+
+
+def test_render_view_rejects_an_unknown_projection(tools: ToolHandlers) -> None:
+    result = call(tools, "render_view", {"projection": "axonometric"})
+    assert result.is_error is True
+    assert result.payload["code"] == InvalidParameter.code
+
+
+def test_render_view_projection_is_declared_in_the_schema(
+    catalog: tuple[ToolSpec, ...],
+) -> None:
+    schema = spec_of(catalog, "render_view").input_schema
+    projection = schema["properties"]["projection"]
+    assert projection["enum"] == ["plan", "iso"]
+    assert projection["default"] == "plan"
+
+
+# ---------------------------------------------------------------------------
 # Le catalogue entier reste cohérent
 # ---------------------------------------------------------------------------
 

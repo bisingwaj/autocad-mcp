@@ -39,7 +39,7 @@ et « mesures » :
 exact dans le code, l'hypothèse formulée, le geste de vérification, et la
 correction à appliquer si l'hypothèse est fausse.
 
-**82 entrées**, réparties en 10 phases à dérouler dans l'ordre. Les phases 0 à 3
+**89 entrées**, réparties en 11 phases à dérouler dans l'ordre. Les phases 0 à 3
 conditionnent tout le reste : ne pas passer à la suivante tant que la
 précédente n'est pas verte.
 
@@ -47,6 +47,12 @@ précédente n'est pas verte.
 rend réellement `Blocks.Add`, et ce que signifie réellement « asynchrone » pour
 `SendCommand`. Tout le chantier des blocs dépend de la première, toute la
 passerelle de commandes de la seconde.
+
+**Le chantier des maillages ajoute une troisième incertitude du même ordre :
+W-84**, la base — zéro ou un — des indices de facette. Elle diffère des deux
+premières sur un point qui la rend plus dangereuse, pas moins : une hypothèse
+fausse ici **ne lève aucune erreur**. Elle produit un volume déformé, visible
+seulement au rendu, jamais dans `BatchResult.failures`.
 
 ---
 
@@ -76,7 +82,7 @@ logging.basicConfig(level=logging.DEBUG)
 ## Phase 0 — Chargement et connexion
 
 ### W-01 — L'import de `pywin32` aboutit sous Windows
-- **Où** : `acad_com.py:592` `_ensure_modules`
+- **Où** : `acad_com.py:603` `_ensure_modules`
 - **Hypothèse** : `import pythoncom` et `import win32com.client` réussissent, et
   `pythoncom.com_error` existe bien sous ce nom.
 - **Vérifier** : `AcadComBackend()._ensure_modules()` ne lève rien ;
@@ -113,7 +119,7 @@ logging.basicConfig(level=logging.DEBUG)
   limite, ou à sélectionner par `Documents` sur le nom du fichier.
 
 ### W-05 — `Dispatch` démarre AutoCAD, et la scrutation suffit
-- **Où** : `acad_com.py:825` `_launch`, appel ligne 698
+- **Où** : `acad_com.py:836` `_launch`, appel ligne 698
 - **Hypothèse** : quand aucune instance ne tourne, `Dispatch` en lance une, et
   interroger `app.Documents.Count` toutes les `startup_poll_interval` (0,5 s)
   pendant `startup_timeout` (120 s) détecte le moment où elle répond. Remplace
@@ -133,7 +139,7 @@ logging.basicConfig(level=logging.DEBUG)
   `document_info()`.
 
 ### W-07 — Un bureau vide reçoit un nouveau document
-- **Où** : `acad_com.py:860` `_acquire_document`
+- **Où** : `acad_com.py:871` `_acquire_document`
 - **Hypothèse** : `Documents.Count == 0` ⇒ `Documents.Add()` ; sinon
   `app.ActiveDocument`.
 - **Vérifier** : lancer AutoCAD sans dessin ouvert, puis `connect()`.
@@ -142,7 +148,7 @@ logging.basicConfig(level=logging.DEBUG)
   de W-45. Passer alors un gabarit explicite : `Documents.Add("acadiso.dwt")`.
 
 ### W-08 — La sonde de vie du document est fiable
-- **Où** : `acad_com.py:869` `_document_is_alive`
+- **Où** : `acad_com.py:880` `_document_is_alive`
 - **Hypothèse** : lire `doc.Name` échoue par `com_error` si le document a été
   fermé ou AutoCAD arrêté, ce qui produit un `NotConnected` clair.
 - **Vérifier** : `connect()`, fermer le dessin **dans AutoCAD**, puis appeler
@@ -168,7 +174,7 @@ python -c "import win32com.client as w; w.gencache.EnsureDispatch('AutoCAD.Appli
 ```
 
 ### W-09 — Contrôle groupé des constantes
-- **Où** : `acad_com.py:630` `_const`, table de repli `acad_com.py:119-151`
+- **Où** : `acad_com.py:641` `_const`, table de repli `acad_com.py:119-151`
 - **Hypothèse** : à défaut de typelib, les littéraux de `_FALLBACK_CONSTANTS`
   sont justes.
 - **Vérifier**, en une seule commande, **après** makepy :
@@ -228,7 +234,7 @@ python -c "import win32com.client as w; w.gencache.EnsureDispatch('AutoCAD.Appli
 ## Phase 2 — VARIANT, la recette héritée
 
 ### W-15 — Le VARIANT de point
-- **Où** : `acad_com.py:658` `_point`
+- **Où** : `acad_com.py:669` `_point`
 - **Hypothèse** : `VARIANT(VT_ARRAY | VT_R8, [x, y, z])`. **Recette éprouvée en
   production** dans `server.py:62` ; conservée à l'identique, et c'est à ce
   titre le seul élément COM de ce fichier dont on ait une preuve d'usage réel.
@@ -237,14 +243,14 @@ python -c "import win32com.client as w; w.gencache.EnsureDispatch('AutoCAD.Appli
 - **Si faux** : rien ne se dessinerait du tout. Priorité absolue.
 
 ### W-16 — Le VARIANT de tableau plat
-- **Où** : `acad_com.py:672` `_doubles`
+- **Où** : `acad_com.py:683` `_doubles`
 - **Hypothèse** : même forme `VT_ARRAY | VT_R8`, longueur quelconque mais
   **paire** pour les sommets 2D. Dérivée de `server.py:66`, qui définissait le
   helper mais **ne l'appelait jamais** — donc jamais exercée en production.
 - **Vérifier** : voir W-24.
 
 ### W-17 — Les VARIANT de filtre
-- **Où** : `acad_com.py:681` `_shorts` et `acad_com.py:690` `_variants`
+- **Où** : `acad_com.py:692` `_shorts` et `acad_com.py:701` `_variants`
 - **Hypothèse** : les codes de groupe DXF veulent `VT_ARRAY | VT_I2` (entiers
   courts) et les valeurs `VT_ARRAY | VT_VARIANT`. Une inversion, ou des codes
   en `VT_I4`, fait rejeter le filtre.
@@ -253,7 +259,7 @@ python -c "import win32com.client as w; w.gencache.EnsureDispatch('AutoCAD.Appli
   `OperationFailed("Sélection filtrée refusée par AutoCAD")`.
 
 ### W-18 — Le VARIANT d'objets COM
-- **Où** : `acad_com.py:696` `_dispatches`
+- **Où** : `acad_com.py:707` `_dispatches`
 - **Hypothèse** : `VT_ARRAY | VT_DISPATCH` accepte directement les wrappers
   pywin32, sans passer par `._oleobj_`.
 - **Vérifier** : voir W-30.
@@ -389,7 +395,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   `PatternScale`/`PatternAngle` **après** `Evaluate()`.
 
 ### W-30 — `AppendOuterLoop` / `AppendInnerLoop`
-- **Où** : `acad_com.py:1308` `_append_loop`
+- **Où** : `acad_com.py:1321` `_append_loop`
 - **Hypothèse** : la méthode attend un SAFEARRAY d'IDispatch. Le code tente
   d'abord le VARIANT `VT_DISPATCH`, puis retombe sur une liste Python nue, et
   **mémorise la forme qui passe** pour la session.
@@ -436,7 +442,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   valeur réelle dans l'unité du document. Puis `text_override="1,00 m"`.
 
 ### W-34 — `InsertBlock` et les attributs
-- **Où** : `acad_com.py:1600`, attributs `1225` `_fill_attributes`
+- **Où** : `acad_com.py:1613`, attributs `1225` `_fill_attributes`
 - **Hypothèse** : `InsertBlock(point, nom, sx, sy, sz, rotation)` accepte aussi
   bien un nom de bloc défini dans le dessin qu'un chemin DWG ; `HasAttributes`
   précède utilement `GetAttributes()`, qui rend un tuple d'objets portant
@@ -453,7 +459,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
 ## Phase 4 — Style
 
 ### W-35 — Affectation de calque et de couleur par entité
-- **Où** : `acad_com.py:1878` `_apply_style`
+- **Où** : `acad_com.py:1891` `_apply_style`
 - **Hypothèse** : affecter `entity.Layer` et `entity.Color` après création est
   fiable. Choix délibéré : ne **pas** manipuler `doc.ActiveLayer` comme le
   faisait le code historique (`server.py:125`), qui laissait le calque courant
@@ -481,7 +487,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   message d'aide qui évoque l'énumération.
 
 ### W-38 — Chargement des types de ligne
-- **Où** : `acad_com.py:1916` `_apply_linetype`, chargement ligne 1315
+- **Où** : `acad_com.py:1929` `_apply_linetype`, chargement ligne 1315
 - **Hypothèse** : `Linetypes.Load(nom, fichier)` charge depuis `acad.lin`
   (impérial) ou `acadiso.lin` (métrique) ; le code tente les deux dans cet
   ordre ; recharger un type déjà chargé lève, d'où le cache préalable.
@@ -514,7 +520,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
 - **Si faux** : un `created_count` à 2 ou 3 signale une régression du contrat.
 
 ### W-40 — Un calque existant n'est jamais réécrit
-- **Où** : `acad_com.py:1964` `_ensure_layer`
+- **Où** : `acad_com.py:1977` `_ensure_layer`
 - **Hypothèse** : choix d'architecture — un calque déjà présent porte des
   réglages voulus par l'utilisateur.
 - **Vérifier** : créer `MURS` en rouge à la main dans AutoCAD, puis exécuter
@@ -525,7 +531,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
 ## Phase 5 — Sélection, lecture, suppression
 
 ### W-41 — Cycle de vie des jeux de sélection
-- **Où** : `acad_com.py:2895` `_fresh_selection_set`
+- **Où** : `acad_com.py:2922` `_fresh_selection_set`
 - **Hypothèse** : les jeux de sélection **persistent dans le document** ;
   réutiliser le même nom sans supprimer l'ancien lève « déjà existant » au
   deuxième appel. D'où : supprimer, puis ajouter. Le nom est tronqué à 31
@@ -535,7 +541,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   qu'aucun jeu `MCP_FILTER` ne subsiste dans le document.
 
 ### W-42 — Omission de `Point1`/`Point2` en mode « tout »
-- **Où** : `acad_com.py:2830` `_run_select`, cascade lignes 1936-1949
+- **Où** : `acad_com.py:2857` `_run_select`, cascade lignes 1936-1949
 - **Hypothèse** : en `acSelectionSetAll`, les deux points doivent être omis.
   La bonne façon d'omettre un paramètre optionnel en liaison tardive pywin32
   n'est pas certaine, d'où une cascade de trois formes : `pythoncom.Missing`,
@@ -548,7 +554,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   `ss.Select(acSelectionSetWindow, trèsGrandRectangle, …)`.
 
 ### W-43 — Filtrage côté AutoCAD par codes DXF
-- **Où** : `acad_com.py:2799` `_select`
+- **Où** : `acad_com.py:2826` `_select`
 - **Hypothèse** : groupe 0 pour le type, 8 pour le calque, 62 pour la couleur,
   combinés par ET implicite sans opérateur logique. Remplace les boucles Python
   sur tout le ModelSpace du code historique (`server.py:1567`).
@@ -558,7 +564,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   ressemble à un OU, insérer les codes `-4` `"<AND"` / `"AND>"`.
 
 ### W-44 — Le groupe 0 veut le nom **DXF**
-- **Où** : `acad_com.py:2790` `_dxf_type`, table `acad_com.py:205-220`
+- **Où** : `acad_com.py:2817` `_dxf_type`, table `acad_com.py:205-220`
 - **Hypothèse** : le filtre attend `"LWPOLYLINE"`, pas `"AcDbPolyline"` ;
   `"INSERT"` pour un bloc ; `"DIMENSION"` pour **toutes** les cotations, ce qui
   rend `kind="dim_aligned"` non discriminant entre types de cotes.
@@ -575,7 +581,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   doit la trouver. C'est contre-intuitif : à documenter côté outils.
 
 ### W-46 — `HandleToObject` est en temps constant
-- **Où** : `acad_com.py:2718` `_by_handle`, `1798` et `1816`
+- **Où** : `acad_com.py:2745` `_by_handle`, `1798` et `1816`
 - **Hypothèse** : la méthode interroge directement la table des handles. Le code
   historique parcourait tout le ModelSpace (`server.py:635`), soit un appel
   interprocessus par entité.
@@ -596,7 +602,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   légitimement pas de boîte englobante.
 
 ### W-48 — `EXTMIN`/`EXTMAX` et le dessin vide
-- **Où** : `acad_com.py:2414` `_extents_on_worker`, sentinelle `acad_com.py:226`
+- **Où** : `acad_com.py:2441` `_extents_on_worker`, sentinelle `acad_com.py:226`
 - **Hypothèse** : ces variables ne sont rafraîchies **qu'à la régénération** ; un
   dessin vide porte des sentinelles de l'ordre de 1e20, détectées par le seuil
   `1e19`, et `extents()` rend alors `None`.
@@ -627,7 +633,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   seul geste.
 
 ### W-51 — `undo()` supprime par handle, sans `SendCommand`
-- **Où** : `acad_com.py:2113` `undo`, boucle `1542`
+- **Où** : `acad_com.py:2126` `undo`, boucle `1542`
 - **Fait vérifié en documentation** : l'API ActiveX **n'expose aucune méthode
   `Undo`** sur le document. Le code historique envoyait `SendCommand("._UNDO _1 ")`
   (`server.py:1656`), traité de façon asynchrone, sans garantie, et rendait
@@ -648,7 +654,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   et le journal indique « 2 supprimée(s), 1 déjà absente(s) ».
 
 ### W-53 — Calque verrouillé
-- **Où** : `acad_com.py:2022` `delete`, `1552` pour l'annulation
+- **Où** : `acad_com.py:2035` `delete`, `1552` pour l'annulation
 - **Hypothèse** : `Delete()` échoue sur une entité posée sur un calque verrouillé
   ou gelé, et cet échec est rapporté, jamais avalé.
 - **Vérifier** : dessiner sur `MURS`, **verrouiller** `MURS` dans AutoCAD, puis
@@ -668,7 +674,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
 ## Phase 7 — Performance et régénération
 
 ### W-55 — Un seul `Regen` par lot
-- **Où** : `acad_com.py:2923` `_regen`, appelé depuis `_execute_on_worker:865`
+- **Où** : `acad_com.py:2950` `_regen`, appelé depuis `_execute_on_worker:865`
 - **Hypothèse** : le regen est l'appel le plus coûteux de l'API. Le code
   historique en déclenchait un **par entité** (`server.py:1198`, `1223`, `1241`,
   `1251`…), doublé d'un `time.sleep(1)` (`server.py:71`), soit plus de trois
@@ -680,7 +686,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   `acAllViewports` (2) au lieu de `acActiveViewport` (3), cf. W-10.
 
 ### W-56 — Reprise sur AutoCAD occupé
-- **Où** : `acad_com.py:757` `_submit_read`
+- **Où** : `acad_com.py:768` `_submit_read`
 - **Hypothèse** : `RPC_E_CALL_REJECTED` (0x80010001) et
   `RPC_E_SERVERCALL_RETRYLATER` (0x8001010A) sont les HRESULT renvoyés quand
   l'utilisateur est au milieu d'une commande. La reprise est réservée aux
@@ -716,7 +722,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
 ## Phase 8 — Divers
 
 ### W-59 — `$INSUNITS` et les dessins sans unité
-- **Où** : `acad_com.py:923` `unit`, `1596`
+- **Où** : `acad_com.py:934` `unit`, `1596`
 - **Hypothèse** : `GetVariable("INSUNITS")` rend un entier ; 4 = mm, 5 = cm,
   6 = m, 1 = pouce, 2 = pied. La valeur 0, « sans unité », est **fréquente** et
   fait retomber sur `default_unit` (millimètre par défaut).
@@ -761,7 +767,7 @@ assert backend.query(EntityFilter(handles=tuple(res.to_dict()["handles"])))
   n'apparaît dans `handles`.
 
 ### W-64 — Relâchement des pointeurs COM à la fermeture
-- **Où** : `acad_com.py:877` `close`, `acad_com.py:892` `_release_on_worker`
+- **Où** : `acad_com.py:888` `close`, `acad_com.py:903` `_release_on_worker`
 - **Hypothèse** : les pointeurs doivent être relâchés **dans l'appartement qui
   les a obtenus**, donc sur le worker, avant son arrêt ; `close()` ne ferme
   jamais AutoCAD.
@@ -829,7 +835,7 @@ print(res.to_dict())
   sort avec des colonnes nommées `P`.
 
 ### W-68 — `Blocks.Item` sur un nom inconnu lève, il ne rend pas `None`
-- **Où** : `acad_com.py:1835` `_block_exists`
+- **Où** : `acad_com.py:1848` `_block_exists`
 - **Hypothèse** : `doc.Blocks.Item("NOM_ABSENT")` lève une `com_error`. C'est la
   forme déjà utilisée pour `SelectionSets.Item` (W-41). Sonder un nom coûte un
   appel, énumérer la table en coûte un par bloc : un dessin de production en
@@ -860,7 +866,7 @@ print(res.to_dict())
   il lève alors `OperationFailed` en annonçant qu'un bloc incomplet subsiste.
 
 ### W-70 — Les propriétés ActiveX qui portent les mesures
-- **Où** : `acad_com.py:2319` `_measures`, table `acad_com.py:311`
+- **Où** : `acad_com.py:2332` `_measures`, table `acad_com.py:311`
 - **Hypothèse** : ces cinq propriétés existent et sont en unités du dessin —
   `AcadLine.Length`, `AcadLWPolyline.Length` et `.Area`,
   `AcadCircle.Circumference` et `.Area`, `AcadArc.ArcLength`. Les deux premières
@@ -881,7 +887,7 @@ print(res.to_dict())
   par sommets, renflements compris, comme le fait `ezdxf_be._polyline_measures`.
 
 ### W-71 — Redresser un repère : `Rotation`, `UpsideDown`, `Backward`
-- **Où** : `acad_com.py:1450` `_straighten`, appel `acad_com.py:1421`
+- **Où** : `acad_com.py:1463` `_straighten`, appel `acad_com.py:1421`
 - **Hypothèse** : `AcadAttributeReference` expose `Rotation`, `UpsideDown` et
   `Backward`, et **affecter `Rotation` ne déplace pas le point d'ancrage** : le
   texte tourne autour de lui. La direction d'extrusion n'est délibérément pas
@@ -898,7 +904,7 @@ print(res.to_dict())
   que `GetAttributes()` rend bien des objets vivants et non des copies.
 
 ### W-72 — Parcourir le contenu d'un bloc pour y retrouver les attributs
-- **Où** : `acad_com.py:1480` `_upright_tags`
+- **Où** : `acad_com.py:1493` `_upright_tags`
 - **Hypothèse** : le contenu d'un `AcadBlock` se parcourt par `Count` et
   `Item(i)`, et une définition d'attribut s'y reconnaît à son `ObjectName`
   valant exactement `AcDbAttributeDefinition`.
@@ -913,7 +919,7 @@ print(res.to_dict())
   aucun repère n'est redressé, sauf ceux couverts par le repli de session.
 
 ### W-73 — Données étendues : `RegisterApplication`, `SetXData`, `GetXData`
-- **Où** : écriture `acad_com.py:1565` `_mark_upright`, lecture
+- **Où** : écriture `acad_com.py:1578` `_mark_upright`, lecture
   `acad_com.py:1540` `_wants_upright`
 - **Hypothèse, en trois morceaux.** `Document.RegisterApplication(nom)` déclare
   l'application ; `SetXData(codes, valeurs)` attend deux SAFEARRAY de même
@@ -958,7 +964,7 @@ print(res.to_dict())
   que la suite commune aux backends doit attraper.
 
 ### W-75 — Redéfinir un bloc existant : garantie de présence, jamais écrasement
-- **Où** : `acad_com.py:1624` `_define_block`, décision alignée sur
+- **Où** : `acad_com.py:1637` `_define_block`, décision alignée sur
   `ezdxf_be.py:_define_block`
 - **Hypothèse** : décision d'architecture, alignée sur le backend `ezdxf` qui,
   lui, est vérifiable sur la machine de développement. Un nom déjà pris est
@@ -984,7 +990,7 @@ print(res.to_dict())
 directement sur le document et `undo_last_batch` ne la défera pas.
 
 ### W-76 — `SendCommand` est asynchrone, et on ne sait donc pas
-- **Où** : `acad_com.py:2587`, méthode publique `acad_com.py:2438` `run_command`
+- **Où** : `acad_com.py:2587`, méthode publique `acad_com.py:2465` `run_command`
 - **L'hypothèse la plus lourde de la passerelle.** `doc.SendCommand(texte)`
   dépose la chaîne dans la file de commandes d'AutoCAD et rend la main. Il ne
   rend **aucune valeur**, **aucun code d'erreur**, et rien ne dit que la commande
@@ -1014,7 +1020,7 @@ directement sur le document et `undo_last_batch` ne la défera pas.
   d'annulation, si bien qu'un Ctrl+Z dans l'interface reste le bon geste.
 
 ### W-77 — Le texte transmis : préfixes `._` et espace finale
-- **Où** : `acad_com.py:2575` `_run_command_on_worker`
+- **Où** : `acad_com.py:2602` `_run_command_on_worker`
 - **Hypothèse** : le texte est **entièrement fabriqué par le backend**, jamais
   recopié de l'appelant. La forme est `"._NOM arg1 arg2 "`, où le point impose
   la commande intégrée même si elle a été redéfinie par `UNDEFINE`, le tiret bas
@@ -1029,7 +1035,7 @@ directement sur le document et `undo_last_batch` ne la défera pas.
   recopier dans la ligne de commande pour comparer.
 
 ### W-78 — Une commande incomplète bloque AutoCAD, et `CMDACTIVE` le dit
-- **Où** : `acad_com.py:2648` `_command_active`
+- **Où** : `acad_com.py:2675` `_command_active`
 - **Hypothèse** : `GetVariable("CMDACTIVE")` rend 0 quand aucune commande n'est
   en cours. Une valeur non nulle signifie qu'AutoCAD est **resté dans la
   commande** et attend une saisie qu'on ne lui a pas donnée. Le compte-rendu
@@ -1046,7 +1052,7 @@ directement sur le document et `undo_last_batch` ne la défera pas.
   commande, au prix d'annuler aussi les commandes légitimement interactives.
 
 ### W-79 — La liste blanche du backend, seconde barrière
-- **Où** : `acad_com.py:2502` `_validated_command`, liste `acad_com.py:266`
+- **Où** : `acad_com.py:2529` `_validated_command`, liste `acad_com.py:266`
 - **Ce n'est pas une hypothèse COM, c'est une règle de sécurité**, et elle a été
   **exécutée sur macOS** : transmettre une chaîne libre à AutoCAD revient à
   exécuter du code arbitraire, puisque son interpréteur accepte aussi bien une
@@ -1072,7 +1078,7 @@ directement sur le document et `undo_last_batch` ne la défera pas.
 ## Phase 10 — Parité des mesures avec le backend DXF
 
 ### W-80 — L'aire d'une polyligne ouverte n'est jamais publiée
-- **Où** : `acad_com.py:2319` `_measures`
+- **Où** : `acad_com.py:2332` `_measures`
 - **Hypothèse** : AutoCAD rend, pour une polyligne **ouverte**, l'aire du
   contour qu'on obtiendrait en la refermant. C'est une mesure de quelque chose
   qui n'est pas dessiné : la publier gonflerait tout total de surfaces. La clé
@@ -1100,7 +1106,7 @@ directement sur le document et `undo_last_batch` ne la défera pas.
   `ezdxf_be` qu'il faut compléter.
 
 ### W-82 — Le coût des mesures en allers-retours
-- **Où** : `acad_com.py:2290` `_describe`
+- **Où** : `acad_com.py:2303` `_describe`
 - **Hypothèse** : publier les mesures coûte une à deux lectures de propriété par
   entité décrite, donc un à deux appels interprocessus de plus. `query` étant
   borné par `limit`, la dépense reste bornée.
@@ -1110,6 +1116,192 @@ directement sur le document et `undo_last_batch` ne la défera pas.
 - **Si trop cher** : n'interroger les mesures que sur demande, par un paramètre
   de `query`, plutôt que de les retirer — mais ce serait un changement du
   contrat, à décider avec `ops/query.py`.
+
+---
+
+## Phase 11 — Maillages, la troisième dimension
+
+Chantier ajouté après coup, pour combler un écart de contrat : le moteur DXF
+sait exécuter `AddMesh` depuis son premier jour, ce backend ne le savait pas et
+faisait échouer tout plan en volume. `AddPolyfaceMesh` a été retenue pour la
+matérialiser — voir la justification complète dans la docstring de
+`_add_mesh`. **Aucune des sept entrées qui suivent n'a pu être exercée devant
+AutoCAD.**
+
+Préparer un dessin neuf, puis un prisme simple, asymétrique pour qu'un décalage
+d'indice se voie :
+
+```python
+from autocad_mcp.backends.acad_com import AcadComBackend
+from autocad_mcp.model.ops import AddMesh, OperationBatch, Style
+from autocad_mcp.ops.volume import extrude_ring
+
+be = AcadComBackend(); be.connect()
+mesh = extrude_ring([(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)], 0.0, 3.0)
+res = be.execute(OperationBatch((mesh,), label="maillage"))
+print(res.to_dict())
+```
+
+Comparer systématiquement au rendu du backend `ezdxf` sur le **même** lot,
+produit par la compétence `dxf-preview` : c'est la seule preuve indépendante
+d'AutoCAD que le volume obtenu est le bon, silhouette et proportions comprises.
+
+### W-83 — `AddPolyfaceMesh`, la route retenue face à `Add3DFace` et `AddMesh`
+- **Où** : `acad_com.py:2986` `_add_mesh`
+- **Décision d'architecture, pas seulement une hypothèse COM.** Trois routes
+  ActiveX permettent de poser un volume : `AddPolyfaceMesh(VerticesList, FaceList)`
+  correspond exactement à la forme du modèle (sommets + facettes par indices)
+  et rend une **seule** entité ; `Add3DFace` pose une facette à la fois, donc
+  un mur à trois tranches (allège, linteau, chaînage) produirait des dizaines
+  d'entités indépendantes pour un seul volume ; `AddMesh` au sens ActiveX
+  (`Add3DMesh`, grille M x N) décrit une nappe régulière, pas un prisme.
+  **Hypothèse non vérifiée ici** : `AddPolyfaceMesh` existe bien sur
+  `AcadModelSpace` et, comme le reste des méthodes de dessin, sur l'`AcadBlock`
+  rendu par `Blocks.Add` — même hypothèse que W-66, à laquelle celle-ci
+  s'ajoute plutôt qu'elle ne s'y substitue.
+- **Vérifier** : le lot ci-dessus doit rendre `ok: True`, **une seule** entité
+  créée (`created_count == 1`, pas six, une par facette). Dans AutoCAD,
+  cliquer une fois sur le prisme : il doit se sélectionner en entier. `LISTE`
+  doit annoncer un maillage de faces polygonales (« maillage 3D » ou
+  « polyface mesh » selon la version et la langue).
+- **Si faux** : `com_error` sur l'appel — voir le message renvoyé, il cite les
+  contraintes d'`AddPolyfaceMesh` (au moins quatre sommets, au moins une
+  facette). Si la méthode est absente de l'objet, replier sur `Add3DFace`,
+  un appel par groupe de quatre indices déjà produit par
+  `_polyface_indices`, en acceptant une entité par facette et en rapportant
+  tous les handles obtenus.
+
+### W-84 — Base un contre base zéro : le piège principal, silencieux
+- **Où** : `acad_com.py:3056` `_polyface_indices`
+- **L'hypothèse la plus lourde du chantier des maillages, à traiter en
+  priorité.** Le modèle numérote ses sommets à partir de **zéro**
+  (`vertices[0]` est le premier). La documentation ActiveX d'`AddPolyfaceMesh`
+  numérote les siens à partir de **un**. Chaque indice de `op.faces` est donc
+  incrémenté avant l'envoi. **Une hypothèse fausse ici ne fait lever aucune
+  erreur à AutoCAD** : `FaceList` reste un tableau d'entiers valide, seulement
+  décalé d'un cran, et chaque facette pointe sur le sommet voisin de celui
+  voulu. Le volume obtenu serait déformé, pas absent — exactement le genre de
+  défaut silencieux que ce projet s'interdit ailleurs par construction
+  (`BatchResult.ok` resterait `True`), mais que cette hypothèse précise peut
+  réintroduire si elle est fausse.
+- **Vérifier**, l'essai décisif : le prisme asymétrique ci-dessus (base
+  2 x 1, hauteur 3, dont aucune face n'est carrée). Comparer, sommet par
+  sommet, avec le rendu PNG du **même lot** produit par le backend `ezdxf`
+  (compétence `dxf-preview`). Les deux volumes doivent être identiques —
+  même largeur dans le même sens, même hauteur, aucune face vrillée. Puis,
+  dans AutoCAD, `LISTE` sur le maillage et contrôler que les coordonnées des
+  sommets de chaque face correspondent aux quatre coins attendus de cette
+  face, pas à ceux de la face voisine.
+- **Si faux** : un volume qui apparaît « tordu », dont une face traverse les
+  autres, ou dont la première et la dernière facette semblent avoir échangé un
+  sommet, signale un décalage d'indice. Retirer le `+ 1` de
+  `_polyface_indices` si le modèle s'avère déjà en base un, ce qui serait
+  surprenant mais pas impossible sur une version ancienne d'ActiveX.
+
+### W-85 — Groupes de quatre stricts, et le repli triangle / éventail
+- **Où** : `acad_com.py:3094` `_polyface_indices`
+- **Hypothèse** : la documentation ActiveX impose que `FaceList` soit un
+  multiple de quatre — une facette occupe toujours quatre positions. Une
+  facette triangulaire du modèle est donc fermée en répétant son dernier
+  sommet, convention du format DXF POLYFACE MESH sous-jacent. Une facette à
+  plus de quatre sommets — possible depuis `ops.volume.slab`, dont le contour
+  est arbitraire, jamais depuis `wall_volume` ou `box`, dont les panneaux sont
+  toujours des quadrilatères — est découpée en éventail depuis son premier
+  sommet, chaque triangle obtenu étant refermé par la règle précédente.
+- **Vérifier** : un prisme triangulaire (`extrude_ring` sur un contour à trois
+  points) doit produire un maillage fermé sans trou visible aux deux
+  capuchons. Puis un lot construit avec `slab()` sur un contour à cinq
+  sommets (une dalle en L, par exemple) : les deux capuchons doivent rester
+  pleins, sans facette manquante ni croisée.
+- **Si faux** : si `AddPolyfaceMesh` refuse un tableau dont la taille n'est
+  pas un multiple de quatre, l'erreur est immédiate et explicite — ce n'est
+  pas un défaut silencieux, contrairement à W-84. **Limite assumée, non
+  testable depuis une machine sans AutoCAD** : un contour non convexe
+  produirait un éventail qui sort de la facette. Aucun contour construit par
+  `ops/volume.py` n'est aujourd'hui non convexe (des rectangles), donc le cas
+  ne s'est pas présenté à l'écriture ; un contour en L ou en U passé à
+  `slab()` y expose potentiellement ce module, et resterait à traiter en
+  amont, dans la couche modèle, par une triangulation qui ne suppose pas la
+  convexité.
+
+### W-86 — Le type VARIANT de `FaceList` : entier court, pas long
+- **Où** : `acad_com.py:3028` `_add_mesh`, constante `acad_com.py:328`
+- **Hypothèse, appuyée sur un exemple officiel plutôt que devinée.** La
+  documentation Autodesk d'`AddPolyfaceMesh` dit seulement « FaceList: Variant
+  (array of integers) », ambigu entre `VT_I2` et `VT_I4`. Mais l'exemple VBA
+  publié par Autodesk déclare `Dim FaceList(0 To 7) As Integer` — `Integer`
+  est le type **16 bits** de VBA, ce qui correspond à `VT_ARRAY | VT_I2`,
+  déjà la recette retenue par `_shorts` ailleurs dans ce fichier pour « un
+  tableau d'entiers ». C'est donc `_shorts`, pas `_variants` ni un nouveau
+  tableau `VT_I4`, qui sert ici.
+  **Défensif, pas une hypothèse COM** : `_POLYFACE_MAX_INDEX` (32767) borne le
+  plus grand indice acceptable avant même l'appel, pour lever une erreur
+  nommée plutôt que de découvrir un débordement silencieux sur un dessin réel.
+- **Vérifier** : le prisme de W-84 se dessine sans `com_error` immédiate liée
+  au type de `FaceList`. Puis, pour la borne, un maillage dont le nombre de
+  sommets dépasse 32767 (un maillage généré, pas dessiné à la main) doit lever
+  `InvalidGeometry` **avant** tout appel COM, jamais un `com_error` opaque.
+- **Si faux** : un `com_error` immédiat sur `AddPolyfaceMesh` avec un message
+  évoquant un type incompatible signale que `VT_I4` était attendu. Remplacer
+  l'appel à `self._shorts(face_indices)` par un nouveau tableau
+  `VT_ARRAY | VT_I4` dans `_add_mesh`, et desserrer `_POLYFACE_MAX_INDEX` à la
+  borne d'un entier 32 bits.
+
+### W-87 — L'`ObjectName` d'un maillage : `AcDbPolyFaceMesh`
+- **Où** : table `acad_com.py:222`, lue par `_describe` `acad_com.py:2305`
+- **Hypothèse** : le nom ObjectARX d'un objet rendu par `AddPolyfaceMesh` est
+  exactement `AcDbPolyFaceMesh` — Face et Mesh avec une majuscule, comme
+  l'intitulé de la référence Autodesk « AcDbPolyFaceMesh Methods ». Une
+  différence de casse ou d'orthographe ferait retomber `_describe` sur le nom
+  brut au lieu de `"mesh"` : dégradé propre, pas un plantage, mais un filtrage
+  par `kind="mesh"` qui ne trouverait jamais rien par cette voie.
+- **Vérifier** : après W-83, `backend.query(limit=1)[0].kind`. Attendu :
+  `"mesh"`, pas `"AcDbPolyFaceMesh"`.
+- **Si faux** : corriger la clé dans `_OBJECT_NAME_TO_KIND` avec le nom
+  effectivement lu.
+
+### W-88 — Le filtre par `kind="mesh"` recouvre aussi les polylignes historiques
+- **Où** : table `acad_com.py:243`
+- **Ce n'est pas une hypothèse, c'est une ambiguïté du format elle-même,
+  documentée, à confirmer plutôt qu'à deviner.** Un maillage polyface hérite
+  en DXF du type `POLYLINE` (groupe 0), le même que les polylignes 2D et 3D
+  historiques (`AcDb2dPolyline`, `AcDb3dPolyline`) — la distinction se fait
+  par un indicateur du groupe 70, qu'un filtre de sélection par code de
+  groupe 0 ne peut pas exprimer sans un second test (`-4 "&"` sur le groupe
+  70), que `_select` ne construit pas aujourd'hui. Ce backend ne crée jamais
+  de `AcDb2dPolyline`/`AcDb3dPolyline` lui-même — `AddPolyline` du modèle
+  produit toujours une `AcDbPolyline` légère, un type DXF différent
+  (`LWPOLYLINE`) — donc le cas ne se présente pas sur un dessin **entièrement
+  produit par ce projet**. Il se présente en revanche sur un dessin existant,
+  dessiné à la main ou importé, qui contiendrait de telles polylignes
+  historiques.
+  **Ce que ça ne change pas** : la lecture par handle (`query(handles=...)`,
+  `_matches_residual`) reste précise, elle passe par `ObjectName` (W-87), pas
+  par ce filtre.
+- **Vérifier** : sur un dessin neuf ne contenant que des entités de ce projet,
+  `count(EntityFilter(kind="mesh"))` doit correspondre exactement au nombre de
+  maillages créés. Puis, essai qui matérialise la limite : dessiner à la main
+  une polyligne 3D classique (`_3DPOLY` dans AutoCAD, pas `LIGNEP`), puis
+  relancer le même comptage : si le total augmente d'un, la limite décrite
+  ici est réelle et touche ce dessin.
+- **Si ça gêne** : ajouter le test `-4`/`"&"` sur le groupe 70 dans `_select`
+  et `_dxf_type`, réservé au cas `kind == "mesh"` — changement plus
+  invasif, à ne faire qu'une fois la gêne confirmée en pratique.
+
+### W-89 — `NumberOfVertices` et `NumberOfFaces`, comptes publiés par `_measures`
+- **Où** : `acad_com.py:2396` `_measures`
+- **Hypothèse** : `AcadPolyfaceMesh` expose `NumberOfVertices` (propriété
+  documentée par Autodesk) et `NumberOfFaces` (non trouvée dans la
+  documentation consultée, supposée par symétrie). Publiées sous les clés
+  `vertices` et `faces` de `extra`, **volontairement en dehors** de
+  `base.MEASURE_KEYS` : un volume n'a ni longueur ni aire au sens de ce
+  dictionnaire, et rien ne doit les additionner par erreur dans une
+  nomenclature de surfaces.
+- **Vérifier** : sur le prisme de W-84 (6 sommets, 6 facettes après capuchons),
+  `query(limit=1)[0].extra` doit porter `vertices: 6` et `faces: 6`.
+- **Si faux** : si `NumberOfFaces` n'existe pas, l'échec est intercepté par
+  `_number_property` et la clé `faces` est simplement omise — pas de
+  plantage, juste une information en moins.
 
 ---
 
@@ -1139,3 +1331,7 @@ directement sur le document et `undo_last_batch` ne la défera pas.
 | W-77 `._NOM ` sur AutoCAD français | lance la commande | | |
 | W-78 `CMDACTIVE` après commande incomplète | 1 | | |
 | W-79 listes blanches identiques | oui | | |
+| W-83 `AddPolyfaceMesh` disponible | oui, une seule entité | | |
+| W-84 base des indices de facette | un (base un) | | |
+| W-86 type VARIANT de `FaceList` | `VT_I2` (`_shorts`) | | |
+| W-87 `ObjectName` d'un maillage | `AcDbPolyFaceMesh` | | |

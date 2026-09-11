@@ -111,6 +111,21 @@ class Defaults:
     WINDOW_FRAME_M = 0.05
     #: Hauteur de texte d'annotation lisible à l'échelle du centième.
     TEXT_HEIGHT_M = 0.25
+
+    # --- Troisième dimension -------------------------------------------
+    # Valeurs usuelles du logement. Elles n'ont d'effet que sur le volume:
+    # un plan reste un plan, et ces hauteurs ne changent rien au dessin en
+    # deux dimensions déjà produit.
+    #: Hauteur sous plafond d'un mur courant.
+    WALL_HEIGHT_M = 2.50
+    #: Hauteur d'allège: le muret plein sous une fenêtre.
+    SILL_HEIGHT_M = 0.90
+    #: Dessus de baie vitrée, sous le linteau.
+    WINDOW_HEAD_M = 2.10
+    #: Hauteur de passage d'une porte, sous le linteau.
+    DOOR_HEAD_M = 2.10
+    #: Épaisseur d'une dalle de plancher.
+    SLAB_THICKNESS_M = 0.20
     #: Hauteur d'un attribut de bloc. Plus petite qu'une annotation courante:
     #: un repère posé sur une chaise de quarante-cinq centimètres doit tenir
     #: dans le symbole au lieu de le recouvrir.
@@ -167,6 +182,26 @@ class Defaults:
     @property
     def dim_text_gap(self) -> float:
         return meters_to(self.DIM_TEXT_GAP_M, self.unit)
+
+    @property
+    def wall_height(self) -> float:
+        return meters_to(self.WALL_HEIGHT_M, self.unit)
+
+    @property
+    def sill_height(self) -> float:
+        return meters_to(self.SILL_HEIGHT_M, self.unit)
+
+    @property
+    def window_head(self) -> float:
+        return meters_to(self.WINDOW_HEAD_M, self.unit)
+
+    @property
+    def door_head(self) -> float:
+        return meters_to(self.DOOR_HEAD_M, self.unit)
+
+    @property
+    def slab_thickness(self) -> float:
+        return meters_to(self.SLAB_THICKNESS_M, self.unit)
 
     @property
     def tolerance(self) -> float:

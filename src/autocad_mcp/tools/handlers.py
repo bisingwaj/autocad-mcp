@@ -55,8 +55,10 @@ from ..logging_setup import get_logger
 from ..model.layers import color_index
 from ..model.ops import Operation, OperationBatch
 from ..ops import architecture, blocks, primitives
+from ..ops import dimension as ops_dimension
 from ..ops import query as ops_query
 from ..ops import validate as ops_validate
+from ..ops import volume as ops_volume
 from ..units import Defaults
 from .schemas import (
     MAX_BATCH_ITEMS,
@@ -68,6 +70,7 @@ from .schemas import (
     MAX_RENDER_PIXELS,
     MEASURE_MODES,
     MIN_RENDER_PIXELS,
+    RENDER_PROJECTIONS,
     ToolSpec,
     build_catalog,
 )
@@ -165,6 +168,22 @@ def _number_or(args: dict[str, Any], name: str, default: float, *, where: str) -
     return default if value is None else value
 
 
+def _opt_int_list(value: Any, name: str, *, where: str) -> list[int] | None:
+    """Liste d'entiers optionnelle, telle que ``segments`` de l'élément dimensions."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise InvalidParameter(f"{name} doit être une liste", field=name, where=where, got=repr(value))
+    result: list[int] = []
+    for i, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise InvalidParameter(
+                f"{name}[{i}] doit être un entier", field=name, where=where, got=repr(item)
+            )
+        result.append(item)
+    return result
+
+
 def _text(value: Any, name: str, *, where: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise InvalidParameter(
@@ -256,6 +275,10 @@ _STRUCTURE_ELEMENTS = (
     "window",
     "room",
     "label",
+    "wall_volume",
+    "slab",
+    "box",
+    "dimensions",
 )
 _OPENING_KINDS = ("door", "window", "passage")
 _HANDS = ("left", "right")
@@ -641,6 +664,10 @@ class ToolHandlers:
 
         width = self._pixels(args, "width", self._config.render_size[0])
         height = self._pixels(args, "height", self._config.render_size[1])
+        projection = _choice(args, "projection", RENDER_PROJECTIONS, "plan", where="projection")
+
+        if projection == "iso":
+            return await self._render_iso(backend, width, height, args)
 
         png = await to_thread.run_sync(backend.render_png, width, height)
         count = await to_thread.run_sync(backend.count, None)
@@ -648,6 +675,7 @@ class ToolHandlers:
 
         payload: dict[str, Any] = {
             "backend": backend.name,
+            "projection": "plan",
             "width": width,
             "height": height,
             "png_bytes": len(png),
@@ -659,6 +687,72 @@ class ToolHandlers:
             payload["note"] = (
                 "Le dessin est vide: l'image l'est aussi, ce qui n'est pas une erreur."
             )
+        return ToolResult(payload, image_png=png)
+
+    async def _render_iso(
+        self, backend: CadBackend, width: int, height: int, args: dict[str, Any]
+    ) -> ToolResult:
+        """Vue en volume, relue depuis le document plutôt que depuis un lot en mémoire.
+
+        Relire le document plutôt que rejouer une liste d'opérations garde ce
+        rendu correct qu'il vienne d'un seul appel à build_structure ou de
+        plusieurs, et même d'un document rouvert.
+        """
+        from .. import render as render_module
+        from .. import viewer
+
+        document = getattr(backend, "document", None)
+        if document is None:
+            raise UnsupportedOperation(
+                f"Le backend {backend.name} n'expose pas de document pour la vue en volume",
+                remedy=(
+                    "la projection iso suppose un moteur qui garde un document "
+                    "accessible, ce que le backend ezdxf fait; utiliser "
+                    'projection="plan" sur ce moteur'
+                ),
+            )
+
+        scene = await to_thread.run_sync(partial(viewer.scene_from_document, document))
+        if not scene["meshes"]:
+            raise OperationFailed(
+                "Le document ne contient aucun volume: la vue en trois dimensions "
+                "serait vide",
+                remedy=(
+                    "construire d'abord des volumes avec build_structure (wall_volume, "
+                    "slab ou box), puis rappeler render_view en projection iso"
+                ),
+            )
+
+        elevation = _number_or(
+            args, "elevation_deg", render_module.ISO_ELEVATION, where="elevation_deg"
+        )
+        azimuth = _number_or(
+            args, "azimuth_deg", render_module.ISO_AZIMUTH, where="azimuth_deg"
+        )
+        png = await to_thread.run_sync(
+            partial(
+                render_module.render_scene_png,
+                scene,
+                width,
+                height,
+                elevation=elevation,
+                azimuth=azimuth,
+            )
+        )
+
+        payload: dict[str, Any] = {
+            "backend": backend.name,
+            "projection": "iso",
+            "width": width,
+            "height": height,
+            "png_bytes": len(png),
+            "mesh_count": scene["counts"]["meshes"],
+            "face_count": scene["counts"]["faces"],
+            "bounds": scene["bounds"],
+            "elevation_deg": elevation,
+            "azimuth_deg": azimuth,
+            "unit": scene["unit"],
+        }
         return ToolResult(payload, image_png=png)
 
     async def _extents(self, backend: CadBackend) -> tuple[float, float, float, float] | None:
@@ -1163,15 +1257,66 @@ def _structure_operation(item: dict[str, Any], index: int, defaults: Defaults) -
             color=color,
             show_area=_flag(item, "show_area", True, where=where),
         )
-    # label: seul cas où la conversion des degrés est à faire ici, la fonction
-    # métier attendant des radians comme tout le modèle.
-    return architecture.label(
-        _point(_field(item, "position", where=where), "position", where=where),
-        _text(_field(item, "text", where=where), "text", where=where),
+    if kind == "label":
+        # Seul cas où la conversion des degrés est à faire ici, la fonction
+        # métier attendant des radians comme tout le modèle.
+        return architecture.label(
+            _point(_field(item, "position", where=where), "position", where=where),
+            _text(_field(item, "text", where=where), "text", where=where),
+            defaults,
+            height=_opt_number(item, "height", where=where),
+            rotation=math.radians(_number_or(item, "rotation_deg", 0.0, where=where)),
+            color=color,
+        )
+    if kind == "wall_volume":
+        # Pendant en volume de wall_network: mêmes points, mêmes baies, même
+        # validation de rang de mur, une hauteur en plus.
+        points = _point_list(
+            _field(item, "points", where=where), "points", where=where, minimum=2
+        )
+        closed = _flag(item, "closed", False, where=where)
+        return ops_volume.wall_volume(
+            points,
+            defaults,
+            thickness=_opt_number(item, "thickness", where=where),
+            closed=closed,
+            openings=_openings(item.get("openings"), points, closed, where=where),
+            height=_opt_number(item, "height", where=where),
+            layer=_opt_text(item, "layer", where=where),
+            color=color,
+        )
+    if kind == "slab":
+        return ops_volume.slab(
+            _point_list(
+                _field(item, "contour", where=where), "contour", where=where, minimum=3
+            ),
+            defaults,
+            thickness=_opt_number(item, "thickness", where=where),
+            z=_number_or(item, "z", 0.0, where=where),
+            layer=_opt_text(item, "layer", where=where),
+        )
+    if kind == "box":
+        return ops_volume.box(
+            _point(_field(item, "corner1", where=where), "corner1", where=where),
+            _point(_field(item, "corner2", where=where), "corner2", where=where),
+            z=_number_or(item, "z", 0.0, where=where),
+            height=_number(_field(item, "height", where=where), "height", where=where),
+            layer=_opt_text(item, "layer", where=where) or "FURNITURE",
+            color=color,
+        )
+    # dimensions: pendant coté de wall_network, mêmes points et mêmes baies,
+    # aucune maçonnerie ni symbole produits.
+    points = _point_list(_field(item, "points", where=where), "points", where=where, minimum=2)
+    closed = _flag(item, "closed", False, where=where)
+    return ops_dimension.dimension_walls(
+        points,
         defaults,
-        height=_opt_number(item, "height", where=where),
-        rotation=math.radians(_number_or(item, "rotation_deg", 0.0, where=where)),
-        color=color,
+        openings=_openings(item.get("openings"), points, closed, where=where),
+        closed=closed,
+        thickness=_opt_number(item, "thickness", where=where),
+        segments=_opt_int_list(item.get("segments"), "segments", where=where),
+        outside=_flag(item, "outside", True, where=where),
+        layer=_opt_text(item, "layer", where=where),
     )
 
 
