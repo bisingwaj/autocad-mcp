@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# Sorties de dessin produites pendant les essais.
+*.dxf
+*.png
+!tests/golden/*.dxf
+!tests/golden/*.png
+.DS_Store

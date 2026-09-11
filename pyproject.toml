@@ -1,0 +1,106 @@
+[project]
+name = "autocad-mcp"
+version = "0.2.0"
+description = "Serveur MCP pour le pilotage conversationnel d'AutoCAD, avec backend DXF multiplateforme"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Jérémie BISINGWA" }]
+keywords = ["autocad", "mcp", "cad", "dxf", "ezdxf"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: Editors :: Vector-Based",
+]
+
+dependencies = [
+    # Le serveur utilise l'API bas niveau du SDK dans sa forme 2.x, qui passe
+    # les gestionnaires au constructeur (`on_list_tools`, `on_call_tool`). Les
+    # décorateurs de la 1.x n'existent plus: un plancher a 1.2 promettrait une
+    # installation qui echoue a l'import.
+    "mcp>=2.2.0",
+    # Importe directement pour executer les appels backend hors de la boucle
+    # d'evenements. Arrive aussi par mcp, mais une dependance utilisee se declare.
+    "anyio>=4.0",
+    "ezdxf>=1.3.0",
+]
+
+[project.optional-dependencies]
+# Le backend AutoCAD n'est installable que sous Windows.
+windows = ["pywin32>=306; sys_platform == 'win32'"]
+# Le rendu en image, utilise le module de dessin d'ezdxf.
+render = ["matplotlib>=3.8", "pillow>=10.0"]
+
+[project.scripts]
+autocad-mcp = "autocad_mcp.__main__:run"
+
+[project.urls]
+Homepage = "https://github.com/bisingwaj/autocad-mcp"
+Repository = "https://github.com/bisingwaj/autocad-mcp"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "mypy>=1.11",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autocad_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "windows: exige Windows et une instance AutoCAD ouverte, sauté ailleurs",
+    "render: exige les dependances optionnelles de rendu",
+]
+
+[tool.mypy]
+# Pas de python_version figé: mypy suit l'interpréteur courant. Les stubs de
+# numpy, tirés par matplotlib, exigent une syntaxe de type propre à 3.12 et
+# échouent à l'analyse si on force une version antérieure. La compatibilité
+# 3.10 est garantie par ruff en target py310 et par la CI qui l'exécute.
+strict = true
+warn_unreachable = true
+# pywin32 n'est pas installable sur la machine de developpement.
+[[tool.mypy.overrides]]
+module = ["win32com.*", "pythoncom", "matplotlib.*"]
+ignore_missing_imports = true
+
+# ezdxf est typé mais expose ses symboles par reexport implicite, ce que le
+# mode strict refuse. On accepte le reexport pour cette bibliotheque seulement.
+[[tool.mypy.overrides]]
+module = ["ezdxf", "ezdxf.*"]
+ignore_missing_imports = true
+implicit_reexport = true
+
+# Le SDK mcp expose ses symboles par reexport implicite, comme ezdxf.
+[[tool.mypy.overrides]]
+module = ["mcp", "mcp.*"]
+implicit_reexport = true
+
+# numpy arrive via matplotlib, ses stubs ne sont pas notre affaire.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# E501 gere par le formateur, BLE001 traite par la regle projet sur les except nus.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

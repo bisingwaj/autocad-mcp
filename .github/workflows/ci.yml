@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, refonte-architecture]
+  pull_request:
+
+jobs:
+  # La suite complète tourne sur macOS et Linux grâce au backend DXF.
+  # C'est tout l'intérêt de la séparation logique/backend: le projet cible
+  # AutoCAD sous Windows mais se vérifie partout.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Installer les dépendances
+        run: uv sync --extra render --all-groups --python ${{ matrix.python }}
+
+      - name: Le paquet doit s'importer sans pywin32
+        run: uv run python -c "import autocad_mcp; print(autocad_mcp.__version__)"
+
+      - name: Style
+        run: uv run ruff check src/ tests/
+
+      - name: Types
+        run: uv run mypy src/
+
+      - name: Tests
+        run: uv run pytest -q
+
+      - name: Vérifier que la couverture Windows existe toujours
+        run: uv run pytest -m windows --collect-only -q
+
+      - name: Parité des backends
+        run: uv run python -m autocad_mcp.devtools.contract_diff
